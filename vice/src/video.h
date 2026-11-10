@@ -321,6 +321,9 @@ typedef struct video_cbm_palette_s {
 
 void video_color_palette_internal(struct video_canvas_s *canvas, struct video_cbm_palette_s *cbm_palette);
 int video_color_update_palette(struct video_canvas_s *canvas);
+/* VIC-X: show `palette' (exact RGB, copied) on `canvas' instead of the
+   configured palette; NULL restores the configured palette. */
+int video_color_set_palette_override(struct video_canvas_s *canvas, const struct palette_s *palette);
 void video_color_palette_free(struct palette_s *palette);
 
 #endif

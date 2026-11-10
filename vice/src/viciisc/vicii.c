@@ -60,6 +60,7 @@
 #include "vicii.h"
 #include "viciitypes.h"
 #include "vsync.h"
+#include "vicx.h"
 #include "video.h"
 #include "viewport.h"
 
@@ -306,6 +307,8 @@ void vicii_reset(void)
     vicii.set_vborder = 1;
     vicii.main_border = 1;
 
+    /* every reset locks VIC-X and restores its defaults */
+    vicx_reset();
 }
 
 /* called at powerup */

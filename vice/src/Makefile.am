@@ -53,6 +53,7 @@ SUBDIRS = \
 	raster \
 	vicii \
 	viciisc \
+	vicx \
 	vdc \
 	crtc \
 	gfxoutputdrv \
@@ -97,6 +98,7 @@ DIST_SUBDIRS = \
 	raster \
 	vicii \
 	viciisc \
+	vicx \
 	vdc \
 	crtc \
 	gfxoutputdrv \
@@ -615,6 +617,7 @@ vic20cart_lib = $(top_builddir)/src/vic20/cart/libvic20cart.a
 vicii_lib = $(top_builddir)/src/vicii/libvicii.a
 viciidtv_lib = $(top_builddir)/src/vicii/libviciidtv.a
 viciisc_lib = $(top_builddir)/src/viciisc/libviciisc.a
+vicx_lib = $(top_builddir)/src/vicx/libvicx.a
 video_lib = $(top_builddir)/src/video/libvideo.a
 vsid_lib = $(top_builddir)/src/c64/libvsid.a
 vsidstubs_lib = $(top_builddir)/src/c64/libvsidstubs.a
@@ -727,6 +730,7 @@ x64_libs =  \
 	$(driver_libs) \
 	$(rs232drv_lib) \
 	$(vicii_lib) \
+	$(vicx_lib) \
 	$(raster_lib) \
 	$(userport_lib) \
 	$(diag_lib) \
@@ -785,6 +789,7 @@ x64sc_libs =  \
 	$(driver_libs) \
 	$(rs232drv_lib) \
 	$(viciisc_lib) \
+	$(vicx_lib) \
 	$(raster_lib) \
 	$(userport_lib) \
 	$(diag_lib) \
@@ -908,6 +913,7 @@ xscpu64_libs =  \
 	$(driver_libs) \
 	$(rs232drv_lib) \
 	$(viciisc_lib) \
+	$(vicx_lib) \
 	$(raster_lib) \
 	$(userport_lib) \
 	$(diag_lib) \
@@ -1634,6 +1640,9 @@ $(viciidtv_lib):
 $(viciisc_lib):
 	@echo "making libviciisc.a in viciisc"
 	@(cd viciisc && $(MAKE) libviciisc.a)
+$(vicx_lib):
+	@echo "making libvicx.a in vicx"
+	@(cd vicx && $(MAKE) libvicx.a)
 $(video_lib):
 	@echo "making all in video"
 	@(cd video && $(MAKE))

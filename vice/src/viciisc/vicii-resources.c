@@ -43,6 +43,7 @@
 #include "viciitypes.h"
 #include "video.h"
 #include "vsync.h"
+#include "vicx.h"
 
 
 vicii_resources_t vicii_resources;
@@ -207,6 +208,9 @@ int vicii_resources_init(void)
     }
 
     if (resources_register_int(resources_int2) < 0) {
+        return -1;
+    }
+    if (vicx_resources_init() < 0) {
         return -1;
     }
     return resources_register_int(resources_int);

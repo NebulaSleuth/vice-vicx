@@ -5,6 +5,7 @@ AM_CPPFLAGS = \
 	@ARCH_INCLUDES@ \
 	-I$(top_builddir)/src \
 	-I$(top_srcdir)/src \
+	-I$(top_srcdir)/src/vicx \
 	-I$(top_srcdir)/src/c64/cart \
 	-I$(top_srcdir)/src/datasette \
 	-I$(top_srcdir)/src/printerdrv \

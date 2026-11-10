@@ -52,6 +52,7 @@
 #include "userport.h"
 #include "vice-event.h"
 #include "vicii.h"
+#include "vicx.h"
 
 #include "c64-snapshot.h"
 
@@ -81,6 +82,7 @@ int c64_snapshot_write(const char *name, int save_roms, int save_disks, int even
         || drive_snapshot_write_module(s, save_disks, save_roms) < 0
         || fsdrive_snapshot_write_module(s) < 0
         || vicii_snapshot_write_module(s) < 0
+        || vicx_snapshot_write_module(s) < 0
         || c64_glue_snapshot_write_module(s) < 0
         || event_snapshot_write_module(s, event_mode) < 0
         || memhacks_snapshot_write_modules(s) < 0
@@ -126,6 +128,7 @@ int c64_snapshot_read(const char *name, int event_mode)
         || drive_snapshot_read_module(s) < 0
         || fsdrive_snapshot_read_module(s) < 0
         || vicii_snapshot_read_module(s) < 0
+        || vicx_snapshot_read_module(s) < 0
         || c64_glue_snapshot_read_module(s) < 0
         || event_snapshot_read_module(s, event_mode) < 0
         || memhacks_snapshot_read_modules(s) < 0

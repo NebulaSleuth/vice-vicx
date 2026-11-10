@@ -884,6 +884,46 @@ static palette_t *video_load_palette(const video_cbm_palette_t *p,
     return palette;
 }
 
+/* Palette override used by VIC-X palette remapping: the given RGB values
+   are shown as they are, without the colour adjustments that the
+   configured palette goes through (the CRT emulation tables are still
+   built from them, like for an external palette).  */
+static struct video_canvas_s *override_canvas = NULL;
+static palette_t *override_palette = NULL;
+
+static palette_t *palette_copy(const palette_t *src)
+{
+    palette_t *dst = palette_create(src->num_entries, NULL);
+    unsigned int i;
+
+    if (dst == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < src->num_entries; i++) {
+        dst->entries[i].red = src->entries[i].red;
+        dst->entries[i].green = src->entries[i].green;
+        dst->entries[i].blue = src->entries[i].blue;
+    }
+    return dst;
+}
+
+int video_color_set_palette_override(struct video_canvas_s *canvas, const palette_t *palette)
+{
+    if (override_palette != NULL) {
+        palette_free(override_palette);
+        override_palette = NULL;
+        override_canvas = NULL;
+    }
+    if (canvas == NULL) {
+        return 0;
+    }
+    if (palette != NULL) {
+        override_palette = palette_copy(palette);
+        override_canvas = canvas;
+    }
+    return video_color_update_palette(canvas);
+}
+
 /* Calculate or load a palette, depending on configuration.  */
 int video_color_update_palette(struct video_canvas_s *canvas)
 {
@@ -910,6 +950,21 @@ int video_color_update_palette(struct video_canvas_s *canvas)
     /*resources_get_int("MachineVideoStandard", &video);*/
     video = canvas->viewport->crt_type;
     video_resources = &(canvas->videoconfig->video_resources);
+
+    if (override_palette != NULL && canvas == override_canvas) {
+        palette = palette_copy(override_palette);
+        if (palette == NULL) {
+            return -1;
+        }
+        video_calc_gammatable(&canvas->videoconfig->color_tables, video_resources, video);
+        ycbcr = video_ycbcr_palette_create(palette->num_entries);
+        video_palette_to_ycbcr(palette, ycbcr, video);
+        video_calc_ycbcrtable(video_resources, ycbcr, &canvas->videoconfig->color_tables, video);
+        video_palette_to_ycbcr_oddlines(palette, ycbcr, video);
+        video_calc_ycbcrtable_oddlines(video_resources, ycbcr, &canvas->videoconfig->color_tables, video);
+        video_ycbcr_palette_free(ycbcr);
+        return video_canvas_palette_set(canvas, palette);
+    }
 
 #if 0
     /* setup the palette params so we get 100% the same as in peptos calculations */

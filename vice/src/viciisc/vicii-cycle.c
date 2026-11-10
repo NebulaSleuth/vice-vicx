@@ -47,6 +47,7 @@
 #include "vicii-resources.h"
 #include "vicii.h"
 #include "viciitypes.h"
+#include "vicx.h"
 
 static inline void check_badline(void)
 {
@@ -215,6 +216,8 @@ static inline void vicii_cycle_start_of_frame(void)
         vicii.light_pen.x_extra_bits = (vicii.color_latency ? 2 : 1);
         vicii_trigger_light_pen_internal(1);
     }
+
+    vicx_start_of_frame();
 }
 
 static inline void vicii_cycle_end_of_line(void)

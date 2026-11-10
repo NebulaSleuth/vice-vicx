@@ -147,6 +147,7 @@
 #include "userport_funmp3.h"
 #include "vice-event.h"
 #include "vicii.h"
+#include "vicx.h"
 #include "vicii-mem.h"
 #include "video.h"
 #include "video-sound.h"
@@ -264,13 +265,16 @@ static io_source_t vicii_d000_device = {
     "VIC-II",              /* name of the chip */
     IO_DETACH_NEVER,       /* chip is never involved in collisions, so no detach */
     IO_DETACH_NO_RESOURCE, /* does not use a resource for detach */
-    0xd000, 0xd0ff, 0x3f,  /* regs: $d000-d03f, mirrors: $d040-$d0ff */
+    0xd000, 0xd0ff, 0xff,  /* regs: $d000-d03f, mirrors: $d040-$d0ff;
+                              the full offset goes to VIC-X, which owns
+                              $d040-$d06f when unlocked and otherwise
+                              hands the access to the VIC-II (masked to $3f) */
     1,                     /* read is always valid */
-    vicii_store,           /* store function */
+    vicx_d000_store,       /* store function */
     NULL,                  /* NO poke function */
-    vicii_read,            /* read function */
-    vicii_peek,            /* peek function */
-    vicii_dump,            /* chip state information dump function */
+    vicx_d000_read,        /* read function */
+    vicx_d000_peek,        /* peek function */
+    vicx_dump,             /* chip state information dump function */
     IO_CART_ID_NONE,       /* not a cartridge */
     IO_PRIO_HIGH,          /* high priority, chip and mirrors never involved in collisions */
     0,                     /* insertion order, gets filled in by the registration function */
@@ -286,7 +290,7 @@ static io_source_t vicii_d100_device = {
     IO_DETACH_NO_RESOURCE,        /* does not use a resource for detach */
     0xd100, 0xd1ff, 0x3f,         /* mirrors of $d000-$d03f */
     1,                            /* read is always valid */
-    vicii_store,                  /* store function */
+    vicx_mirror_store,            /* store function (cancels a partial VIC-X unlock) */
     NULL,                         /* NO poke function */
     vicii_read,                   /* read function */
     vicii_peek,                   /* peek function */
@@ -306,7 +310,7 @@ static io_source_t vicii_d200_device = {
     IO_DETACH_NO_RESOURCE,        /* does not use a resource for detach */
     0xd200, 0xd2ff, 0x3f,         /* mirrors of $d000-$d03f */
     1,                            /* read is always valid */
-    vicii_store,                  /* store function */
+    vicx_mirror_store,            /* store function (cancels a partial VIC-X unlock) */
     NULL,                         /* NO poke function */
     vicii_read,                   /* read function */
     vicii_peek,                   /* peek function */
@@ -326,7 +330,7 @@ static io_source_t vicii_d300_device = {
     IO_DETACH_NO_RESOURCE,        /* does not use a resource for detach */
     0xd300, 0xd3ff, 0x3f,         /* mirrors of $d000-$d03f */
     1,                            /* read is always valid */
-    vicii_store,                  /* store function */
+    vicx_mirror_store,            /* store function (cancels a partial VIC-X unlock) */
     NULL,                         /* NO poke function */
     vicii_read,                   /* read function */
     vicii_peek,                   /* peek function */

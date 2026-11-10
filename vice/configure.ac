@@ -3564,6 +3564,7 @@ AC_OUTPUT([Makefile
            src/vic20/cart/Makefile
            src/vicii/Makefile
            src/viciisc/Makefile
+           src/vicx/Makefile
            src/video/Makefile
            src/version.h
            src/vice-version.sh

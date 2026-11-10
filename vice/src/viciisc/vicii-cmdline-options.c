@@ -40,6 +40,7 @@
 #include "vicii-timing.h"
 #include "vicii.h"
 #include "viciitypes.h"
+#include "vicx.h"
 
 
 static int border_set_func(const char *value, void *extra_param)
@@ -166,5 +167,8 @@ int vicii_cmdline_options_init(void)
         return -1;
     }
 
+    if (vicx_cmdline_options_init() < 0) {
+        return -1;
+    }
     return cmdline_register_options(cmdline_options);
 }
