@@ -436,6 +436,9 @@ void vicii_raster_draw_handler(void)
                            <= ((unsigned int)vicii.last_displayed_line - vicii.screen_height);
     }
 #endif
+    /* VIC-X: mix the layers into the finished line before it is drawn */
+    vicx_mix_line(vicii.dbuf, vicii.xbgbuf, vicii.raster_line);
+
     raster_line_emulate(&vicii.raster);
 
     vsync_do_end_of_line();

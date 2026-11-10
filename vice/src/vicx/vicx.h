@@ -40,6 +40,27 @@ struct snapshot_s;
 #define VICX_REGSPACE_SIZE  0x0a00  /* $20000-$209FF */
 #define VICX_PORT_MASK      0x3ffff /* 18-bit port addresses */
 
+/* Layer setup (32 bytes per layer in register space, spec "Layer setup").
+   Mode byte +0 (encoding chosen for the VICE model, not yet in the spec):
+   bits 0-1 mode, bit 2 16x16 tiles, bit 3 double-width pixels. */
+#define VICX_LAYER0_OFFSET      0x800   /* $20800 */
+#define VICX_LAYER1_OFFSET      0x820   /* $20820 */
+#define VICX_LAYER_SETUP_SIZE   32
+#define VICX_LMODE_MASK         0x03
+#define VICX_LMODE_TILE4        0x00
+#define VICX_LMODE_TILE8        0x01
+#define VICX_LMODE_BITMAP4      0x02
+#define VICX_LMODE_BITMAP8      0x03
+#define VICX_LMODE_TILE16       0x04
+#define VICX_LMODE_DOUBLEWIDTH  0x08
+
+/* The display window the layers fill: the VIC-II's 320x200 text area. */
+#define VICX_WINDOW_FIRST_LINE  51
+#define VICX_WINDOW_WIDTH       320
+#define VICX_WINDOW_HEIGHT      200
+/* index of window pixel x = 0 in the x64sc VIC-II line buffer (vicii.dbuf) */
+#define VICX_DBUF_WINDOW_X      (17 * 8)
+
 /* CTRL ($D048) bits */
 #define VICX_CTRL_L0        0x01
 #define VICX_CTRL_L1        0x02
@@ -54,6 +75,8 @@ int vicx_cmdline_options_init(void);
 /* Machine hooks */
 void vicx_reset(void);
 void vicx_start_of_frame(void);
+void vicx_start_of_line(void);
+void vicx_mix_line(uint8_t *dbuf, const uint8_t *bg, unsigned int line);
 
 /* VIC-II I/O hooks.  `addr' is the offset from $D000 ($00-$FF).  The
    d000 functions replace vicii_store/read/peek for $D000-$D0FF, the

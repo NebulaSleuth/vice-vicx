@@ -11,11 +11,21 @@
  *   - the 256 x 4 byte palette at $20000; entries 0-15 reset to the
  *     emulator's current C64 palette
  *   - CTRL bit 3: VIC-II colours shown through palette entries 0-15
+ *   - step 2: layer 0 as an 8-bit 320x200 bitmap from VRAM (CTRL bit 0),
+ *     behind the VIC-II, showing through VIC-II pixels drawn in the $D021
+ *     background colour when CTRL bit 4 is set; layer setup and CTRL are
+ *     latched at the start of each raster line
  *
- * Step 1 limitation: the palette remap is applied once per frame (at the
- * VIC-II start of frame), so mid-frame palette writes are not visible
- * until the next frame.  VICE's VIC-II pipeline stores 4-bit colour
- * indices per pixel and converts them to RGB with one palette per frame.
+ * Colour path: VICE's VIC-II writes one 8-bit colour index per pixel into a
+ * line buffer.  Layer pixels are written into that buffer as their VIC-X
+ * palette index, and while the remap or a layer is on the canvas palette is
+ * replaced by a 256-entry one built from the VIC-X palette (entries 0-15 are
+ * the stock colours unless the remap is on).  Limitations:
+ *   - the canvas palette is rebuilt once per frame, so palette writes in the
+ *     middle of a frame show from the next frame;
+ *   - with the remap off, layer pixels using entries 0-15 show the stock
+ *     VIC-II colours rather than VIC-X entries 0-15 (they are the same after
+ *     a reset).
  *
  * This file is part of VICE, the Versatile Commodore Emulator.
  * See README for copyright notice.
@@ -75,10 +85,17 @@ typedef struct vicx_s {
     uint8_t regspace[VICX_REGSPACE_SIZE];
     uint8_t vram[VICX_VRAM_SIZE];
 
+    /* values latched at the start of the current raster line */
+    uint8_t line_ctrl;
+    uint8_t line_layer0[VICX_LAYER_SETUP_SIZE];
+
     /* emulator-side bookkeeping, not machine state */
     int stock_palette_pending;  /* entries 0-15 still to be filled from the C64 palette */
-    int palette_dirty;          /* entries 0-15 changed since the canvas was updated */
-    int remap_active;           /* canvas currently shows the VIC-X palette */
+    int palette_dirty;          /* palette RGB changed since the canvas was updated */
+    int remap_active;           /* canvas currently shows a VIC-X palette */
+    uint8_t canvas_mode;        /* CTRL bits the canvas palette was built for */
+    uint8_t stock_rgb[16][3];   /* the stock canvas colours, for entries 0-15 */
+    int stock_rgb_valid;
 } vicx_t;
 
 static vicx_t vicx;
@@ -104,35 +121,68 @@ static const uint8_t fallback_palette[16][3] = {
 /* ------------------------------------------------------------------------- */
 /* palette */
 
-static void palette_set_remap(int on)
+/* Remember the colours the canvas shows while no VIC-X palette is active. */
+static void capture_stock_rgb(void)
+{
+    struct video_canvas_s *canvas = vicii_get_canvas();
+    int i;
+
+    if (vicx.remap_active || canvas == NULL || canvas->palette == NULL
+        || canvas->palette->num_entries < 16) {
+        return;
+    }
+    for (i = 0; i < 16; i++) {
+        vicx.stock_rgb[i][0] = canvas->palette->entries[i].red;
+        vicx.stock_rgb[i][1] = canvas->palette->entries[i].green;
+        vicx.stock_rgb[i][2] = canvas->palette->entries[i].blue;
+    }
+    vicx.stock_rgb_valid = 1;
+}
+
+/* Show the canvas with a VIC-X palette for the CTRL bits in `mode'
+   (PALMAP and/or L0), or the configured palette when `mode' is 0. */
+static void palette_set_canvas(uint8_t mode)
 {
     struct video_canvas_s *canvas = vicii_get_canvas();
     palette_t *p;
-    int i;
+    unsigned int n;
+    unsigned int i;
 
     if (canvas == NULL) {
         return;
     }
-    if (!on) {
+    if (mode == 0) {
         if (vicx.remap_active) {
             video_color_set_palette_override(canvas, NULL);
             vicx.remap_active = 0;
         }
+        vicx.canvas_mode = 0;
         return;
     }
 
-    p = palette_create(16, NULL);
+    capture_stock_rgb();
+    /* 16 entries suffice for the remap alone; layers need all 256 */
+    n = (mode & VICX_CTRL_L0) ? 256 : 16;
+    p = palette_create(n, NULL);
     if (p == NULL) {
         return;
     }
-    for (i = 0; i < 16; i++) {
-        p->entries[i].red = vicx.regspace[i * 4 + 0];
-        p->entries[i].green = vicx.regspace[i * 4 + 1];
-        p->entries[i].blue = vicx.regspace[i * 4 + 2];
+    for (i = 0; i < n; i++) {
+        if (i < 16 && !(mode & VICX_CTRL_PALMAP)) {
+            const uint8_t *c = vicx.stock_rgb_valid ? vicx.stock_rgb[i] : fallback_palette[i];
+            p->entries[i].red = c[0];
+            p->entries[i].green = c[1];
+            p->entries[i].blue = c[2];
+        } else {
+            p->entries[i].red = vicx.regspace[i * 4 + 0];
+            p->entries[i].green = vicx.regspace[i * 4 + 1];
+            p->entries[i].blue = vicx.regspace[i * 4 + 2];
+        }
     }
     video_color_set_palette_override(canvas, p);
     palette_free(p);
     vicx.remap_active = 1;
+    vicx.canvas_mode = mode;
     vicx.palette_dirty = 0;
 }
 
@@ -144,6 +194,7 @@ static void palette_load_stock(void)
     int i;
 
     vicx.stock_palette_pending = 0;
+    capture_stock_rgb();
 
     if (canvas != NULL && canvas->palette != NULL
         && canvas->palette->num_entries >= 16 && !vicx.remap_active) {
@@ -189,13 +240,11 @@ static void port_mem_write(uint32_t addr, uint8_t value)
     }
     addr -= VICX_REGSPACE_BASE;
     if (addr < VICX_REGSPACE_SIZE) {
-        if (addr < 0x40) {
-            if (vicx.stock_palette_pending) {
-                palette_load_stock();
-            }
-            if ((addr & 3) != 3 && vicx.regspace[addr] != value) {
-                vicx.palette_dirty = 1;
-            }
+        if (addr < 0x40 && vicx.stock_palette_pending) {
+            palette_load_stock();
+        }
+        if (addr < 0x400 && (addr & 3) != 3 && vicx.regspace[addr] != value) {
+            vicx.palette_dirty = 1;
         }
         vicx.regspace[addr] = value;
     }
@@ -256,7 +305,7 @@ static uint8_t reg_read(uint16_t reg, int side_effects)
         case 0x44: return 0x00;                 /* CAP_XRAM: not in step 1 */
         case 0x45: return 0x00;                 /* CAP_SPR: not in step 1 */
         case 0x46: return 0x00;                 /* CAP_SPRLINE: not in step 1 */
-        case 0x47: return 0x00;                 /* CAP_FEAT: no layer/sprite/DMA/window yet */
+        case 0x47: return 0x02;                 /* CAP_FEAT: bitmap (layer 0, 8-bit) */
         case 0x48: return vicx.ctrl;
         case 0x49: return vicx.irq_en;
         case 0x4a: return vicx.irq_stat;
@@ -428,7 +477,7 @@ int vicx_dump(void)
 void vicx_reset(void)
 {
     if (vicx_enabled) {
-        palette_set_remap(0);
+        palette_set_canvas(0);
     }
     vicx.unlocked = 0;
     vicx.seq = 0;
@@ -441,26 +490,76 @@ void vicx_reset(void)
     /* hide layers and sprites, clear DMA descriptors, reset the palette;
        VRAM keeps its contents across a reset, like C64 RAM */
     memset(vicx.regspace, 0, sizeof(vicx.regspace));
+    vicx.line_ctrl = 0;
+    memset(vicx.line_layer0, 0, sizeof(vicx.line_layer0));
     vicx.stock_palette_pending = 1;
     vicx.palette_dirty = 0;
 }
 
 void vicx_start_of_frame(void)
 {
+    uint8_t mode;
+
     if (!vicx_enabled) {
         return;
     }
     vicx.frame++;
 
-    if (vicx.ctrl & VICX_CTRL_PALMAP) {
+    mode = vicx.ctrl & (VICX_CTRL_PALMAP | VICX_CTRL_L0);
+    if (mode) {
         if (vicx.stock_palette_pending) {
             palette_load_stock();
         }
-        if (!vicx.remap_active || vicx.palette_dirty) {
-            palette_set_remap(1);
+        if (!vicx.remap_active || vicx.palette_dirty || mode != vicx.canvas_mode) {
+            palette_set_canvas(mode);
         }
     } else if (vicx.remap_active) {
-        palette_set_remap(0);
+        palette_set_canvas(0);
+    }
+}
+
+void vicx_start_of_line(void)
+{
+    if (!vicx_enabled) {
+        return;
+    }
+    vicx.line_ctrl = vicx.ctrl;
+    memcpy(vicx.line_layer0, &vicx.regspace[VICX_LAYER0_OFFSET], VICX_LAYER_SETUP_SIZE);
+}
+
+/* Mix layer 0 into one finished VIC-II line.  `dbuf' is the VIC-II's line of
+   colour indices, `bg' flags the pixels drawn in the $D021 colour; both are
+   indexed like vicii.dbuf, where display-window pixel x is at
+   VICX_DBUF_WINDOW_X + x. */
+void vicx_mix_line(uint8_t *dbuf, const uint8_t *bg, unsigned int line)
+{
+    const uint8_t *l = vicx.line_layer0;
+    uint32_t row;
+    unsigned int y, x, stride;
+    int dw;
+
+    if (!vicx_enabled
+        || (vicx.line_ctrl & (VICX_CTRL_L0 | VICX_CTRL_BGTRANS)) != (VICX_CTRL_L0 | VICX_CTRL_BGTRANS)) {
+        return;     /* layer off, or hidden behind an opaque VIC-II picture */
+    }
+    if (line < VICX_WINDOW_FIRST_LINE || line >= VICX_WINDOW_FIRST_LINE + VICX_WINDOW_HEIGHT) {
+        return;
+    }
+    if ((l[0] & VICX_LMODE_MASK) != VICX_LMODE_BITMAP8) {
+        return;     /* tile and 4-bit modes come in later steps */
+    }
+
+    y = line - VICX_WINDOW_FIRST_LINE;
+    stride = (unsigned int)(l[12] | (l[13] << 8)) & 0x7ff;
+    dw = (l[0] & VICX_LMODE_DOUBLEWIDTH) ? 1 : 0;
+    row = (uint32_t)(l[2] | (l[3] << 8) | (l[4] << 16)) + y * stride;
+
+    dbuf += VICX_DBUF_WINDOW_X;
+    bg += VICX_DBUF_WINDOW_X;
+    for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
+        if (bg[x]) {
+            dbuf[x] = vicx.vram[(row + (x >> dw)) & (VICX_VRAM_SIZE - 1)];
+        }
     }
 }
 
@@ -485,7 +584,7 @@ static int set_vicx_enabled(int value, void *param)
         return 0;
     }
     if (!val) {
-        palette_set_remap(0);
+        palette_set_canvas(0);
     }
     vicx_enabled = val;
     vicx_reset();
@@ -597,7 +696,7 @@ int vicx_snapshot_read_module(snapshot_t *s)
     if (!vicx_enabled) {
         resources_set_int("VICXEnable", 1);
     }
-    palette_set_remap(0);
+    palette_set_canvas(0);
 
     if (SMR_B(m, &b) < 0) {
         goto fail;

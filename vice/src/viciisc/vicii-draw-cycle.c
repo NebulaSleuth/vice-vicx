@@ -109,6 +109,8 @@ static uint8_t render_buffer[8];
 static uint8_t pri_buffer[8];
 
 static uint8_t pixel_buffer[8];
+/* VIC-X: background flag for each pixel_buffer entry (6569 colour latency) */
+static uint8_t pixel_bg[8];
 
 /* color resolution registers */
 static uint8_t cregs[0x2f];
@@ -595,10 +597,12 @@ static DRAW_INLINE void draw_colors_6569(int offs, int i)
 
     /* resolve any unresolved colors */
     lookup_index = (i + 1) & 0x07;
+    pixel_bg[lookup_index] = (pixel_buffer[lookup_index] == COL_D021);
     pixel_buffer[lookup_index] = cregs[pixel_buffer[lookup_index]];
 
     /* draw pixel to buffer */
     vicii.dbuf[offs + i] = pixel_buffer[i];
+    vicii.xbgbuf[offs + i] = pixel_bg[i];
 
     pixel_buffer[i] = render_buffer[i];
 }
@@ -608,6 +612,7 @@ static DRAW_INLINE void draw_colors_8565(int offs, int i)
     int lookup_index;
 
     lookup_index = i;
+    vicii.xbgbuf[offs + i] = (pixel_buffer[lookup_index] == COL_D021);
     /* resolve any unresolved colors */
 
     /* special case for grey dot handling */
@@ -698,6 +703,8 @@ void vicii_draw_cycle_init(void)
 
     /* initialize the pixel ring buffer. */
     memset(pixel_buffer, 0, sizeof(pixel_buffer));
+    memset(pixel_bg, 0, sizeof(pixel_bg));
+    memset(vicii.xbgbuf, 0, VICII_DRAW_BUFFER_SIZE);
 
     /* clear cregs and fill 0x00-0x0f with 1:1 mapping */
     memset(cregs, 0, sizeof(cregs));

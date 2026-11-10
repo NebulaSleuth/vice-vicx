@@ -959,6 +959,21 @@ int video_color_update_palette(struct video_canvas_s *canvas)
         video_calc_gammatable(&canvas->videoconfig->color_tables, video_resources, video);
         ycbcr = video_ycbcr_palette_create(palette->num_entries);
         video_palette_to_ycbcr(palette, ycbcr, video);
+        /* freely chosen RGB colours can be more saturated than any CBM
+           colour; scale their chroma so the CRT tables stay in range */
+        if (video) {
+            float sat = ((float)(video_resources->color_saturation)) * (256.0f / 1000.0f) * CRT_SAT_MUL;
+            unsigned int i;
+            for (i = 0; i < ycbcr->num_entries; i++) {
+                video_ycbcr_color_t *e = &ycbcr->entries[i];
+                double len = sqrt((double)e->cb * e->cb + (double)e->cr * e->cr) * sat;
+                if (len >= 65000.0) {
+                    float f = (float)(65000.0 / len);
+                    e->cb *= f;
+                    e->cr *= f;
+                }
+            }
+        }
         video_calc_ycbcrtable(video_resources, ycbcr, &canvas->videoconfig->color_tables, video);
         video_palette_to_ycbcr_oddlines(palette, ycbcr, video);
         video_calc_ycbcrtable_oddlines(video_resources, ycbcr, &canvas->videoconfig->color_tables, video);

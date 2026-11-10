@@ -34,20 +34,35 @@ to the VIC-II. Enabled, VIC-X still starts locked and only answers at
 | `src/c64/c64.c` | `$D000-$D0FF` I/O device passes the full offset to VIC-X (mask `$ff`); `$D100-$D3FF` mirror writes cancel a partial unlock |
 | `src/c64/c64-snapshot.c` | writes/reads the `VICX` module (only written while VIC-X is enabled) |
 | `src/viciisc/vicii.c` | `vicii_reset()` resets and locks VIC-X |
-| `src/viciisc/vicii-cycle.c` | start of frame: FRAME counter and palette remap update |
+| `src/viciisc/vicii-cycle.c` | start of frame: FRAME counter and canvas palette update; start of line: VIC-X latches CTRL and the layer setup |
+| `src/viciisc/vicii-draw-cycle.c`, `viciitypes.h` | `vicii.xbgbuf[]`: flags the line-buffer pixels drawn in the `$D021` colour |
+| `src/viciisc/vicii.c` (`vicii_raster_draw_handler`) | mixes layer 0 into the finished line before it is drawn |
 | `src/viciisc/vicii-resources.c`, `vicii-cmdline-options.c` | register the resource and options |
-| `src/video/video-color.c`, `src/video.h` | `video_color_set_palette_override()`: show exact RGB values instead of the configured palette |
+| `src/video/video-color.c`, `src/video.h` | `video_color_set_palette_override()`: show exact RGB values (16 or 256 entries) instead of the configured palette; chroma is scaled down where the CRT renderer would overflow |
 | build files | `src/vicx/Makefile.am`, `configure.ac`, `src/Makefile.am` (linked into x64sc, xscpu64, x64) |
 
-## Step 1 limitations
+## Colour path
 
-- The VIC-II colour remap (CTRL bit 3) is applied once per frame at the
-  VIC-II start of frame, so a palette change in the middle of a frame shows
-  from the next frame. VICE's VIC-II draws 4-bit colour indices and converts
-  a whole frame with one palette; mid-frame changes need the 24-bit path
-  planned for the layers.
-- With the CRT emulation renderer, very saturated remap colours make VICE log
-  "video_calc_ycbcrtable: color N cbcr vector too long"; the exit screenshot
-  and the non-CRT renderer show the exact RGB values.
-- XRAM windows, IRQs, DMA, layers and the sprite engine are not implemented;
-  their registers latch values or read 0, and the capability registers say so.
+The VIC-II writes one 8-bit colour index per pixel into a line buffer
+(`vicii.dbuf`, display-window pixel 0 at index 136). At the end of each line
+VIC-X writes layer pixels into that buffer as their VIC-X palette index,
+wherever the VIC-II pixel came from `$D021` and CTRL bits 0 and 4 are set.
+While the remap or layer 0 is on, the canvas palette is a VIC-X one: 16
+entries for the remap alone, 256 with a layer; entries 0-15 are the stock
+colours unless the remap is on.
+
+## Limitations
+
+- The canvas palette is rebuilt once per frame, so a palette change in the
+  middle of a frame shows from the next frame. A true per-pixel 24-bit path
+  would need changes in every VICE renderer.
+- With the remap off, layer pixels that use palette entries 0-15 show the
+  stock VIC-II colours instead of VIC-X entries 0-15 (they are equal after a
+  reset). The 8-bit line buffer has no room for both sets.
+- VRAM is read when the line is mixed, at its end, so VRAM writes during a
+  line show on the whole line rather than from the pixel being drawn.
+- With the CRT emulation renderer, very saturated colours are desaturated a
+  little to keep its tables in range; screenshots show exact RGB.
+- Only layer 0 in 8-bit bitmap mode is drawn. XRAM windows, IRQs, DMA, tiles,
+  layer 1 and the sprite engine are not implemented; their registers latch
+  values or read 0, and the capability registers say so.

@@ -241,6 +241,9 @@ static inline void vicii_cycle_start_of_line(void)
     }
 
     vicii.bad_line = 0;
+
+    /* VIC-X latches CTRL and the layer setup for the new line */
+    vicx_start_of_line();
 }
 
 
