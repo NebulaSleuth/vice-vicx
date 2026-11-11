@@ -48,6 +48,7 @@ struct snapshot_s;
 #define VICX_LAYER1_OFFSET      0x820   /* $20820 */
 #define VICX_ORDER_OFFSET       0x840   /* $20840: layer order */
 #define VICX_SPRSTAT_OFFSET     0x841   /* $20841: sprite engine status */
+#define VICX_WIDE_OFFSET        0x842   /* $20842-$20845: wide window L, R, T, B */
 #define VICX_SPRITES_OFFSET     0x400   /* $20400: sprite table */
 #define VICX_COLLIST_OFFSET     0x900   /* $20900: collision list */
 
@@ -90,6 +91,8 @@ struct snapshot_s;
 #define VICX_WINDOW_HEIGHT      200
 /* index of window pixel x = 0 in the x64sc VIC-II line buffer (vicii.dbuf) */
 #define VICX_DBUF_WINDOW_X      (17 * 8)
+/* the widest wide window: the whole line buffer (65 * 8 pixels) */
+#define VICX_WINDOW_MAX_WIDTH   (65 * 8)
 
 /* CTRL ($D048) bits */
 #define VICX_CTRL_L0        0x01

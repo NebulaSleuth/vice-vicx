@@ -62,6 +62,7 @@
 #include "snapshot.h"
 #include "types.h"
 #include "vicii.h"
+#include "viciitypes.h"
 #include "vicii-mem.h"
 #include "video.h"
 #include "videoarch.h"
@@ -91,6 +92,8 @@ typedef struct vicx_s {
     uint8_t line_ctrl;
     uint8_t line_layer[2][VICX_LAYER_SETUP_SIZE];
     uint8_t line_order;
+    unsigned int line_left, line_right;     /* wide window, latched per line */
+    unsigned int frame_top, frame_bottom;   /* wide window, latched per frame */
 
     /* sprite engine: table latched at the start of the frame, and what
        the current frame has found so far (published at the next frame) */
@@ -517,6 +520,8 @@ void vicx_reset(void)
     vicx.line_ctrl = 0;
     memset(vicx.line_layer, 0, sizeof(vicx.line_layer));
     vicx.line_order = 0;
+    vicx.line_left = vicx.line_right = 0;
+    vicx.frame_top = vicx.frame_bottom = 0;
     memset(vicx.spr_table, 0, sizeof(vicx.spr_table));
     vicx.spr_status = 0;
     vicx.coll_count = 0;
@@ -524,6 +529,17 @@ void vicx_reset(void)
     irq_update();
     vicx.stock_palette_pending = 1;
     vicx.palette_dirty = 0;
+}
+
+/* Wide window edges are clamped at the edge of what the emulator shows
+   (VICE's border mode).  On NTSC, VICE shows the first lines of the next
+   frame below the bottom border; the window stops at the last raster line. */
+static unsigned int clamp_edge(uint8_t v, int limit)
+{
+    if (limit < 0) {
+        limit = 0;
+    }
+    return (v > (unsigned int)limit) ? (unsigned int)limit : v;
 }
 
 void vicx_start_of_frame(void)
@@ -536,6 +552,16 @@ void vicx_start_of_frame(void)
     vicx.frame++;
 
     memcpy(vicx.spr_table, &vicx.regspace[VICX_SPRITES_OFFSET], sizeof(vicx.spr_table));
+    {
+        int last = vicii.last_displayed_line;
+        if (last > (int)vicii.screen_height - 1) {
+            last = (int)vicii.screen_height - 1;
+        }
+        vicx.frame_top = clamp_edge(vicx.regspace[VICX_WIDE_OFFSET + 2],
+                                    VICX_WINDOW_FIRST_LINE - vicii.first_displayed_line);
+        vicx.frame_bottom = clamp_edge(vicx.regspace[VICX_WIDE_OFFSET + 3],
+                                       last - (VICX_WINDOW_FIRST_LINE + VICX_WINDOW_HEIGHT - 1));
+    }
     vicx.irq_stat |= VICX_IRQ_FRAME;
     irq_update();
 
@@ -561,6 +587,14 @@ void vicx_start_of_line(void)
     memcpy(vicx.line_layer[0], &vicx.regspace[VICX_LAYER0_OFFSET], VICX_LAYER_SETUP_SIZE);
     memcpy(vicx.line_layer[1], &vicx.regspace[VICX_LAYER1_OFFSET], VICX_LAYER_SETUP_SIZE);
     vicx.line_order = vicx.regspace[VICX_ORDER_OFFSET];
+    vicx.line_left = clamp_edge(vicx.regspace[VICX_WIDE_OFFSET + 0], vicii.screen_leftborderwidth);
+    vicx.line_right = clamp_edge(vicx.regspace[VICX_WIDE_OFFSET + 1], vicii.screen_rightborderwidth);
+    if (vicx.line_left > VICX_DBUF_WINDOW_X) {
+        vicx.line_left = VICX_DBUF_WINDOW_X;
+    }
+    if (VICX_DBUF_WINDOW_X + VICX_WINDOW_WIDTH + vicx.line_right > VICX_WINDOW_MAX_WIDTH) {
+        vicx.line_right = VICX_WINDOW_MAX_WIDTH - VICX_DBUF_WINDOW_X - VICX_WINDOW_WIDTH;
+    }
 }
 
 static inline uint8_t vram_at(uint32_t addr)
@@ -570,8 +604,8 @@ static inline uint8_t vram_at(uint32_t addr)
 
 /* Draw one line of a layer into out[0..319] as palette indices; 0 means
    transparent.  `l' is the layer setup latched for this line, `y' the
-   display-window line (0-199). */
-static void layer_line(const uint8_t *l, unsigned int y, uint8_t *out)
+   display-window line, `width' the window width (320 unless widened). */
+static void layer_line(const uint8_t *l, unsigned int y, uint8_t *out, unsigned int width)
 {
     unsigned int mode = l[0] & VICX_LMODE_MASK;
     int dw = (l[0] & VICX_LMODE_DOUBLEWIDTH) ? 1 : 0;
@@ -584,12 +618,12 @@ static void layer_line(const uint8_t *l, unsigned int y, uint8_t *out)
         uint32_t row = base + y * stride;
 
         if (mode == VICX_LMODE_BITMAP8) {
-            for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
+            for (x = 0; x < width; x++) {
                 out[x] = vram_at(row + (x >> dw));
             }
         } else {
             uint8_t bank = (uint8_t)((l[14] & 0x0f) << 4);
-            for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
+            for (x = 0; x < width; x++) {
                 unsigned int lx = x >> dw;
                 uint8_t b = vram_at(row + (lx >> 1));
                 uint8_t n = (lx & 1) ? (b & 0x0f) : (b >> 4);   /* high nibble = left pixel */
@@ -615,7 +649,7 @@ static void layer_line(const uint8_t *l, unsigned int y, uint8_t *out)
         uint32_t trow = 0;
         uint8_t bank = 0;
 
-        for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
+        for (x = 0; x < width; x++) {
             unsigned int lx = ((x >> dw) + sx) & ((mapw << tshift) - 1);
             unsigned int tx = lx >> tshift;
             unsigned int px = lx & (tsize - 1);
@@ -663,17 +697,17 @@ static void coll_add(unsigned int e1, unsigned int e2)
 /* Draw the sprites that cover display-window line `y' into front[] and
    behind[] (palette indices, 0 = transparent; a lower entry is in front of
    a higher one), apply the per-line limits and record collisions. */
-static void sprite_line(unsigned int y, uint8_t *front, uint8_t *behind)
+static void sprite_line(unsigned int y, uint8_t *front, uint8_t *behind, unsigned int width)
 {
-    static uint32_t occ[VICX_WINDOW_WIDTH];     /* bit k: k-th sprite drawn here */
+    static uint32_t occ[VICX_WINDOW_MAX_WIDTH];     /* bit k: k-th sprite drawn here */
     uint8_t sel_entry[VICX_SPR_PER_LINE];
     uint8_t sel_mask[VICX_SPR_PER_LINE];
     unsigned int nsel = 0, pixels = 0, e, x;
     uint32_t any = 0;
 
-    memset(front, 0, VICX_WINDOW_WIDTH);
-    memset(behind, 0, VICX_WINDOW_WIDTH);
-    memset(occ, 0, sizeof(occ));
+    memset(front, 0, width);
+    memset(behind, 0, width);
+    memset(occ, 0, width * sizeof(occ[0]));
 
     for (e = 0; e < VICX_SPR_COUNT; e++) {
         const uint8_t *s = &vicx.spr_table[e * VICX_SPR_ENTRY_SIZE];
@@ -714,7 +748,7 @@ static void sprite_line(unsigned int y, uint8_t *front, uint8_t *behind)
             unsigned int px;
             uint8_t c;
 
-            if (sx >= VICX_WINDOW_WIDTH) {
+            if (sx >= width) {
                 continue;
             }
             px = i >> dw;
@@ -748,7 +782,7 @@ static void sprite_line(unsigned int y, uint8_t *front, uint8_t *behind)
     if (!(any & 0x80000000u)) {
         return;
     }
-    for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
+    for (x = 0; x < width; x++) {
         uint32_t o = occ[x];
         unsigned int i, j;
 
@@ -783,7 +817,7 @@ enum { SRC_L0, SRC_L1, SRC_VIC, SRC_SPR, SRC_SPR_BEHIND };
 
 static void mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
 {
-    static uint8_t buf[5][VICX_WINDOW_WIDTH];   /* indexed by SRC_*; VIC unused */
+    static uint8_t buf[5][VICX_WINDOW_MAX_WIDTH];   /* indexed by SRC_*; VIC unused */
     uint8_t ctrl = vicx.line_ctrl;
     int on[5];
     int order[4];
@@ -791,16 +825,21 @@ static void mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
     int pri[4];
     int nseq = 0, pending = 0;
     int bgtrans;
-    unsigned int x, y;
+    unsigned int x, y, width, left, first;
+    int core_line;
     int i, j;
 
-    if (!vicx_enabled || !(ctrl & (VICX_CTRL_L0 | VICX_CTRL_L1 | VICX_CTRL_SPR))) {
+    if (!(ctrl & (VICX_CTRL_L0 | VICX_CTRL_L1 | VICX_CTRL_SPR))) {
         return;
     }
-    if (line < VICX_WINDOW_FIRST_LINE || line >= VICX_WINDOW_FIRST_LINE + VICX_WINDOW_HEIGHT) {
+    first = VICX_WINDOW_FIRST_LINE - vicx.frame_top;
+    if (line < first || line >= VICX_WINDOW_FIRST_LINE + VICX_WINDOW_HEIGHT + vicx.frame_bottom) {
         return;
     }
-    y = line - VICX_WINDOW_FIRST_LINE;
+    y = line - first;
+    left = vicx.line_left;
+    width = VICX_WINDOW_WIDTH + left + vicx.line_right;
+    core_line = (line >= VICX_WINDOW_FIRST_LINE && line < VICX_WINDOW_FIRST_LINE + VICX_WINDOW_HEIGHT);
     on[SRC_L0] = (ctrl & VICX_CTRL_L0) != 0;
     on[SRC_L1] = (ctrl & VICX_CTRL_L1) != 0;
     on[SRC_VIC] = 1;
@@ -837,23 +876,27 @@ static void mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
 
     for (i = 0; i < 2; i++) {
         if (on[i]) {
-            layer_line(vicx.line_layer[i], y, buf[i]);
+            layer_line(vicx.line_layer[i], y, buf[i], width);
         }
     }
     if (on[SRC_SPR]) {
-        sprite_line(y, buf[SRC_SPR], buf[SRC_SPR_BEHIND]);
+        sprite_line(y, buf[SRC_SPR], buf[SRC_SPR_BEHIND], width);
     }
 
-    dbuf += VICX_DBUF_WINDOW_X;
-    src += VICX_DBUF_WINDOW_X;
-    for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
+    dbuf += VICX_DBUF_WINDOW_X - left;
+    src += VICX_DBUF_WINDOW_X - left;
+    for (x = 0; x < width; x++) {
+        int vic_bg = (src[x] == VICX_SRC_BG);
         if (src[x] == VICX_SRC_BORDER) {
-            continue;
+            if (core_line && x >= left && x < left + VICX_WINDOW_WIDTH) {
+                continue;   /* the border over the 320x200 area stays on top */
+            }
+            vic_bg = 1;     /* in the widened part, border pixels act as background */
         }
         for (i = 0; i < nseq; i++) {
             int s = seq[i];
             if (s == SRC_VIC) {
-                if (!(bgtrans && src[x] == VICX_SRC_BG)) {
+                if (!(bgtrans && vic_bg)) {
                     break;          /* opaque VIC-II pixel: keep it */
                 }
             } else if (on[s] && buf[s][x] != 0) {
@@ -864,7 +907,7 @@ static void mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
     }
 }
 
-/* After the last display line nothing more is drawn: publish the frame's
+/* After the window's last line nothing more is drawn: publish the frame's
    sprite engine status and collision list, at the start of the vertical
    blank. */
 static void sprite_frame_done(void)
@@ -887,7 +930,7 @@ void vicx_mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
         return;
     }
     mix_line(dbuf, src, line);
-    if (line == VICX_WINDOW_FIRST_LINE + VICX_WINDOW_HEIGHT - 1) {
+    if (line == VICX_WINDOW_FIRST_LINE + VICX_WINDOW_HEIGHT - 1 + vicx.frame_bottom) {
         sprite_frame_done();
     }
 }

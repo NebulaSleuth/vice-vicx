@@ -72,5 +72,9 @@ colours unless the remap is on.
   snapshot does not keep the latched copy: after loading, the engine shows
   the current table until the next frame. Collisions found in a partly
   emulated frame before a snapshot are lost.
+- The wide window's edges stop at what VICE shows in its current border
+  mode (normal: 32 pixels left and right; PAL 35 lines top and 37 bottom).
+  On NTSC, VICE shows the first lines of the next frame below the bottom
+  border; the window stops at the last raster line instead.
 - XRAM windows and DMA are not implemented; their registers latch values or
   read 0, and the capability registers say so.
