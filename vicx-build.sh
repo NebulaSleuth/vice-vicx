@@ -37,7 +37,7 @@ J=-j"$(nproc)"
 # first build, changes in these directories would not be picked up by
 # "make x64sc.exe" alone.  Rebuild them explicitly; add a directory here when
 # VIC-X work touches code in it.
-LIBDIRS="lib vicx viciisc video c64"
+LIBDIRS="lib vicx viciisc video c64 c64/cart"
 for d in $LIBDIRS; do
     make $J -C "src/$d"
 done

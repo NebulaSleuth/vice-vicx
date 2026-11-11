@@ -51,6 +51,23 @@ struct snapshot_s;
 #define VICX_WIDE_OFFSET        0x842   /* $20842-$20845: wide window L, R, T, B */
 #define VICX_SPRITES_OFFSET     0x400   /* $20400: sprite table */
 #define VICX_COLLIST_OFFSET     0x900   /* $20900: collision list */
+#define VICX_DMADESC_OFFSET     0x880   /* $20880: four DMA descriptors */
+#define VICX_DMADESC_SIZE       32
+
+/* DMA descriptor */
+#define VICX_DMA_OP_COPY        0
+#define VICX_DMA_OP_FILL        1
+#define VICX_DMA_OP_MASKED      2
+#define VICX_DMA_SPACE_C64      0       /* +1 bits 0-1 source, 2-3 destination */
+#define VICX_DMA_SPACE_VRAM     1       /* the port address space */
+#define VICX_DMA_SPACE_XRAM     2
+#define VICX_DMA_2D             0x10
+#define VICX_DMA_IRQ            0x20
+#define VICX_DMA_BYTES_PER_CYCLE 8      /* background speed, about 8 MB/s */
+
+/* CPU windows */
+#define VICX_WINDOW_SIZE        0x2000
+#define VICX_SLOT_ENABLE        0x80
 
 /* Sprite engine (spec "Sprite engine"; VICE uses the target limits) */
 #define VICX_SPR_COUNT          128
@@ -105,8 +122,14 @@ int vicx_resources_init(void);
 void vicx_resources_shutdown(void);
 int vicx_cmdline_options_init(void);
 
-/* Machine hooks */
-void vicx_irq_init(void);
+/* Machine hooks.  `steal' halts the CPU for one cycle (and longer while
+   the VIC-II holds the bus); NULL where the machine has none. */
+void vicx_irq_init(void (*steal)(void));
+void vicx_set_mem_hook(void (*update)(void));
+int vicx_windows_active(void);
+int vicx_window_for_page(unsigned int page);
+uint8_t vicx_window_read(uint16_t addr);
+void vicx_window_store(uint16_t addr, uint8_t value);
 void vicx_reset(void);
 void vicx_start_of_frame(void);
 void vicx_start_of_line(void);

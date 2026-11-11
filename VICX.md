@@ -34,7 +34,9 @@ to the VIC-II. Enabled, VIC-X still starts locked and only answers at
 | `src/c64/c64.c` | `$D000-$D0FF` I/O device passes the full offset to VIC-X (mask `$ff`); `$D100-$D3FF` mirror writes cancel a partial unlock |
 | `src/c64/c64-snapshot.c` | writes/reads the `VICX` module (only written while VIC-X is enabled) |
 | `src/viciisc/vicii.c` | `vicii_reset()` resets and locks VIC-X |
-| `src/viciisc/vicii-irq.c` | registers VIC-X as its own source on the CPU's IRQ line |
+| `src/viciisc/vicii-irq.c` | registers VIC-X as its own source on the CPU's IRQ line, and hands it `vicii_steal_cycles` for DMA |
+| `src/c64/c64memsc.c` | XRAM windows: patched copies of the memory tables while a window is on; `mem_mmu_translate` keeps cached opcode ranges out of windows |
+| `src/c64/cart/reu.c`, `reu.h` | `reu_get_ram()`: XRAM is the REU's memory |
 | `src/viciisc/vicii-cycle.c` | start of frame: FRAME counter and canvas palette update; start of line: VIC-X latches CTRL and the layer setup |
 | `src/viciisc/vicii-draw-cycle.c`, `viciitypes.h` | `vicii.xbgbuf[]`: where each line-buffer pixel came from (foreground, `$D021`, border) |
 | `src/viciisc/vicii.c` (`vicii_raster_draw_handler`) | mixes the layers into the finished line before it is drawn |
@@ -76,5 +78,10 @@ colours unless the remap is on.
   mode (normal: 32 pixels left and right; PAL 35 lines top and 37 bottom).
   On NTSC, VICE shows the first lines of the next frame below the bottom
   border; the window stops at the last raster line instead.
-- XRAM windows and DMA are not implemented; their registers latch values or
-  read 0, and the capability registers say so.
+- DMA moves its data at once. A background transfer then keeps DMA_CMD busy
+  for one cycle per 8 bytes; a transfer touching C64 RAM halts the CPU one
+  cycle per byte (and while the VIC-II holds the bus), like the REU.
+- With monitor watchpoints on, the windows still work, but accesses through
+  them are not watched.
+- Only x64sc gets the windows and the DMA cycle stealing; x64 and xscpu64
+  link the VIC-X code but do not hook it into their memory map.

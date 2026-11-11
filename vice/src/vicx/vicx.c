@@ -52,10 +52,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "alarm.h"
 #include "cmdline.h"
 #include "interrupt.h"
 #include "log.h"
 #include "maincpu.h"
+#include "mem.h"
+#include "c64/cart/reu.h"
 #include "monitor.h"
 #include "palette.h"
 #include "resources.h"
@@ -83,7 +86,7 @@ typedef struct vicx_s {
     uint8_t irq_en;
     uint8_t irq_stat;
     uint8_t frame;
-    uint8_t win[6];             /* W0_PAGE lo/hi, W0_SLOT, W1_... (latched only) */
+    uint8_t win[6];             /* W0_PAGE lo/hi, W0_SLOT, W1_... */
     vicx_port_t port[2];
     uint8_t regspace[VICX_REGSPACE_SIZE];
     uint8_t vram[VICX_VRAM_SIZE];
@@ -104,6 +107,11 @@ typedef struct vicx_s {
     uint8_t coll_seen[VICX_SPR_COUNT * VICX_SPR_COUNT / 8];
 
     unsigned int int_num;       /* CPU interrupt source */
+
+    /* DMA engine */
+    int dma_busy;
+    int dma_irq_pending;        /* raise IRQ_STAT bit 1 when the chain ends */
+    CLOCK dma_done_clk;
     int int_valid;              /* int_num has been registered */
 
     /* emulator-side bookkeeping, not machine state */
@@ -318,6 +326,241 @@ static void irq_update(void)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* XRAM: the REU's memory */
+
+static uint8_t xram_cap(void)
+{
+    unsigned int size;
+
+    reu_get_ram(&size);
+    return (uint8_t)(size >> 20);
+}
+
+static uint8_t xram_read(uint32_t addr)
+{
+    unsigned int size;
+    uint8_t *ram = reu_get_ram(&size);
+
+    return ram ? ram[(addr & 0xffffff) % size] : 0xff;
+}
+
+static void xram_write(uint32_t addr, uint8_t value)
+{
+    unsigned int size;
+    uint8_t *ram = reu_get_ram(&size);
+
+    if (ram) {
+        ram[(addr & 0xffffff) % size] = value;
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* CPU windows */
+
+static void (*mem_hook)(void) = NULL;
+static const uint16_t slot_base[8] = { 0x2000, 0x4000, 0x6000, 0x8000, 0xa000, 0xe000, 0, 0 };
+
+void vicx_set_mem_hook(void (*update)(void))
+{
+    mem_hook = update;
+}
+
+static void windows_changed(void)
+{
+    if (mem_hook) {
+        mem_hook();
+    }
+}
+
+/* Is any window switched on in an allowed slot? */
+int vicx_windows_active(void)
+{
+    int w;
+
+    if (!vicx_enabled) {
+        return 0;
+    }
+    for (w = 0; w < 2; w++) {
+        uint8_t slot = vicx.win[w * 3 + 2];
+        if ((slot & VICX_SLOT_ENABLE) && slot_base[slot & 7]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Which window (0 or 1) covers CPU page `page', or -1.  W0 wins if both sit
+   in the same slot.  Slots 6 and 7 are not allowed: such a window is off. */
+int vicx_window_for_page(unsigned int page)
+{
+    int w;
+
+    if (!vicx_enabled) {
+        return -1;
+    }
+    for (w = 0; w < 2; w++) {
+        uint8_t slot = vicx.win[w * 3 + 2];
+        uint16_t base = slot_base[slot & 7];
+        if ((slot & VICX_SLOT_ENABLE) && base && (page >> 5) == (unsigned int)(base >> 13)) {
+            return w;
+        }
+    }
+    return -1;
+}
+
+static uint32_t window_addr(int w, uint16_t addr)
+{
+    uint32_t page = vicx.win[w * 3] | ((vicx.win[w * 3 + 1] & 7) << 8);
+
+    return page * VICX_WINDOW_SIZE + (addr & (VICX_WINDOW_SIZE - 1));
+}
+
+uint8_t vicx_window_read(uint16_t addr)
+{
+    int w = vicx_window_for_page(addr >> 8);
+
+    return (w < 0) ? 0xff : xram_read(window_addr(w, addr));
+}
+
+void vicx_window_store(uint16_t addr, uint8_t value)
+{
+    int w = vicx_window_for_page(addr >> 8);
+
+    if (w >= 0) {
+        xram_write(window_addr(w, addr), value);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* DMA engine */
+
+static void (*steal_hook)(void) = NULL;
+static alarm_t *dma_alarm = NULL;
+
+static uint8_t port_mem_read(uint32_t addr);
+static void port_mem_write(uint32_t addr, uint8_t value);
+
+static uint8_t dma_read(int space, uint32_t addr)
+{
+    switch (space) {
+        case VICX_DMA_SPACE_C64:  return mem_ram[addr & 0xffff];
+        case VICX_DMA_SPACE_VRAM: return port_mem_read(addr & VICX_PORT_MASK);
+        case VICX_DMA_SPACE_XRAM: return xram_read(addr);
+        default:                  return 0xff;
+    }
+}
+
+static void dma_write(int space, uint32_t addr, uint8_t value)
+{
+    switch (space) {
+        case VICX_DMA_SPACE_C64:  mem_ram[addr & 0xffff] = value; break;
+        case VICX_DMA_SPACE_VRAM: port_mem_write(addr & VICX_PORT_MASK, value); break;
+        case VICX_DMA_SPACE_XRAM: xram_write(addr, value); break;
+        default:                  break;
+    }
+}
+
+static uint32_t le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static unsigned int le16(const uint8_t *p)
+{
+    return (unsigned int)(p[0] | (p[1] << 8));
+}
+
+/* Run one descriptor.  Returns the number of bytes moved in the background
+   (no C64 RAM involved); bytes that touch C64 RAM halt the CPU instead. */
+static unsigned long dma_run(const uint8_t *d)
+{
+    int op = d[0];
+    int sspace = d[1] & 3, dspace = (d[1] >> 2) & 3;
+    int twod = (d[1] & VICX_DMA_2D) != 0;
+    uint32_t src = le32(&d[2]), dst = le32(&d[6]);
+    unsigned int width = le16(&d[10]);
+    unsigned int height = twod ? le16(&d[12]) : 1;
+    unsigned int sstride = le16(&d[14]), dstride = le16(&d[16]);
+    uint8_t fill = d[18], trans = d[19];
+    int c64 = (dspace == VICX_DMA_SPACE_C64) || (op != VICX_DMA_OP_FILL && sspace == VICX_DMA_SPACE_C64);
+    unsigned long bytes = 0;
+    unsigned int row, i;
+
+    if (op > VICX_DMA_OP_MASKED || dspace == 3 || (op != VICX_DMA_OP_FILL && sspace == 3)) {
+        return 0;                               /* reserved: does nothing */
+    }
+    for (row = 0; row < height; row++) {
+        uint32_t s = twod ? src + row * sstride : src;
+        uint32_t t = twod ? dst + row * dstride : dst;
+        for (i = 0; i < width; i++) {
+            if (op == VICX_DMA_OP_FILL) {
+                dma_write(dspace, t + i, fill);
+            } else {
+                uint8_t v = dma_read(sspace, s + i);
+                if (op == VICX_DMA_OP_COPY || v != trans) {
+                    dma_write(dspace, t + i, v);
+                }
+            }
+            if (c64 && steal_hook) {
+                steal_hook();                   /* one cycle, like the REU */
+            }
+        }
+        bytes += width;
+    }
+    return c64 ? 0 : bytes;
+}
+
+static void dma_finish(void)
+{
+    vicx.dma_busy = 0;
+    if (vicx.dma_irq_pending) {
+        vicx.dma_irq_pending = 0;
+        vicx.irq_stat |= VICX_IRQ_DMA;
+        irq_update();
+    }
+}
+
+static void dma_alarm_handler(CLOCK offset, void *data)
+{
+    alarm_unset(dma_alarm);
+    dma_finish();
+}
+
+/* DMA_CMD write: run descriptor n and the chain behind it.  Each descriptor
+   runs at most once per start; a link back to one already run ends the
+   chain.  The VICE model moves the data at once; background transfers keep
+   DMA_CMD busy for the time they would take. */
+static void dma_start(int n)
+{
+    unsigned long background = 0;
+    int ran = 0;
+
+    if (vicx.dma_busy) {
+        return;                                 /* ignored while busy */
+    }
+    vicx.dma_irq_pending = 0;
+    while (n >= 0 && n < 4 && !(ran & (1 << n))) {
+        const uint8_t *d = &vicx.regspace[VICX_DMADESC_OFFSET + n * VICX_DMADESC_SIZE];
+        uint8_t next = d[20];
+
+        ran |= 1 << n;
+        if (d[1] & VICX_DMA_IRQ) {
+            vicx.dma_irq_pending = 1;
+        }
+        background += dma_run(d);
+        n = (next == 0xff) ? -1 : next;
+    }
+    vicx.dma_busy = 1;
+    if (background > 0 && dma_alarm) {
+        vicx.dma_done_clk = maincpu_clk
+            + (background + VICX_DMA_BYTES_PER_CYCLE - 1) / VICX_DMA_BYTES_PER_CYCLE;
+        alarm_set(dma_alarm, vicx.dma_done_clk);
+    } else {
+        dma_finish();
+    }
+}
+
 static uint8_t reg_read(uint16_t reg, int side_effects)
 {
     uint8_t v;
@@ -327,10 +570,10 @@ static uint8_t reg_read(uint16_t reg, int side_effects)
         case 0x41: return 0x58;
         case 0x42: return VICX_VERSION;
         case 0x43: return VICX_VRAM_SIZE / 0x2000; /* CAP_VRAM, 8 KB units */
-        case 0x44: return 0x00;                 /* CAP_XRAM: not in step 1 */
+        case 0x44: return xram_cap();           /* CAP_XRAM, MB */
         case 0x45: return VICX_SPR_COUNT;       /* CAP_SPR */
         case 0x46: return VICX_SPR_PER_LINE;    /* CAP_SPRLINE */
-        case 0x47: return 0x07;                 /* CAP_FEAT: tiles, bitmaps, sprites */
+        case 0x47: return 0x1f;                 /* CAP_FEAT: tiles, bitmaps, sprites, blitter, windows */
         case 0x48: return vicx.ctrl;
         case 0x49: return vicx.irq_en;
         case 0x4a: return vicx.irq_stat;
@@ -355,7 +598,7 @@ static uint8_t reg_read(uint16_t reg, int side_effects)
         case 0x57: case 0x58: case 0x59:
             return vicx.win[reg - 0x54];
         case 0x5a:
-            return 0x00;                        /* DMA_CMD: never busy in step 1 */
+            return vicx.dma_busy ? 0x80 : 0x00; /* DMA_CMD: bit 7 busy */
         default:
             return 0xff;                        /* reserved, and $D06F */
     }
@@ -397,6 +640,10 @@ static void reg_write(uint16_t reg, uint8_t value)
             break;
         case 0x56: case 0x59:                   /* slot + enable */
             vicx.win[reg - 0x54] = value & 0x87;
+            windows_changed();
+            break;
+        case 0x5a:
+            dma_start(value & 3);
             break;
         default:
             break;                              /* read-only and reserved */
@@ -513,6 +760,11 @@ void vicx_reset(void)
     vicx.irq_stat = 0;
     vicx.frame = 0;
     memset(vicx.win, 0, sizeof(vicx.win));
+    if (dma_alarm) {
+        alarm_unset(dma_alarm);
+    }
+    vicx.dma_busy = 0;
+    vicx.dma_irq_pending = 0;
     memset(vicx.port, 0, sizeof(vicx.port));
     /* hide layers and sprites, clear DMA descriptors, reset the palette;
        VRAM keeps its contents across a reset, like C64 RAM */
@@ -527,6 +779,7 @@ void vicx_reset(void)
     vicx.coll_count = 0;
     memset(vicx.coll_seen, 0, sizeof(vicx.coll_seen));
     irq_update();
+    windows_changed();
     vicx.stock_palette_pending = 1;
     vicx.palette_dirty = 0;
 }
@@ -935,8 +1188,10 @@ void vicx_mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
     }
 }
 
-void vicx_irq_init(void)
+void vicx_irq_init(void (*steal)(void))
 {
+    steal_hook = steal;
+    dma_alarm = alarm_new(maincpu_alarm_context, "VICXDMA", dma_alarm_handler, NULL);
     vicx.int_num = interrupt_cpu_status_int_new(maincpu_int_status, "VICX");
     vicx.int_valid = 1;
 }
@@ -1009,7 +1264,7 @@ int vicx_cmdline_options_init(void)
 /* snapshot */
 
 #define SNAP_MAJOR 0
-#define SNAP_MINOR 1
+#define SNAP_MINOR 2
 static const char snap_module_name[] = "VICX";
 
 int vicx_snapshot_write_module(snapshot_t *s)
@@ -1045,6 +1300,13 @@ int vicx_snapshot_write_module(snapshot_t *s)
     }
     if (SMW_BA(m, vicx.regspace, sizeof(vicx.regspace)) < 0
         || SMW_BA(m, vicx.vram, sizeof(vicx.vram)) < 0) {
+        goto fail;
+    }
+    /* 0.2: DMA engine */
+    if (SMW_B(m, (uint8_t)vicx.dma_busy) < 0
+        || SMW_B(m, (uint8_t)vicx.dma_irq_pending) < 0
+        || SMW_DW(m, (uint32_t)(vicx.dma_busy && vicx.dma_done_clk > maincpu_clk
+                                ? vicx.dma_done_clk - maincpu_clk : 0)) < 0) {
         goto fail;
     }
     return snapshot_module_close(m);
@@ -1102,6 +1364,27 @@ int vicx_snapshot_read_module(snapshot_t *s)
         || SMR_BA(m, vicx.vram, sizeof(vicx.vram)) < 0) {
         goto fail;
     }
+    vicx.dma_busy = 0;
+    vicx.dma_irq_pending = 0;
+    if (dma_alarm) {
+        alarm_unset(dma_alarm);
+    }
+    if (!snapshot_version_is_smaller(major, minor, 0, 2)) {
+        uint8_t busy, pend;
+        uint32_t left;
+        if (SMR_B(m, &busy) < 0 || SMR_B(m, &pend) < 0 || SMR_DW(m, &left) < 0) {
+            goto fail;
+        }
+        vicx.dma_irq_pending = pend ? 1 : 0;
+        if (busy) {
+            vicx.dma_busy = 1;
+            vicx.dma_done_clk = maincpu_clk + left;
+            if (dma_alarm) {
+                alarm_set(dma_alarm, vicx.dma_done_clk);
+            }
+        }
+    }
+    windows_changed();
     vicx.stock_palette_pending = 0;
     vicx.palette_dirty = 1;     /* re-apply the remap on the next frame */
     memcpy(vicx.spr_table, &vicx.regspace[VICX_SPRITES_OFFSET], sizeof(vicx.spr_table));

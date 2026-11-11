@@ -304,6 +304,17 @@ static int reu_size_kb = 0;
 /*! \brief Filename of the REU image.  */
 static char *reu_filename = NULL;
 
+/* VIC-X: XRAM is the REU's memory.  Returns NULL while no REU is enabled. */
+uint8_t *reu_get_ram(unsigned int *size)
+{
+    if (!reu_enabled || reu_ram == NULL || reu_size == 0) {
+        *size = 0;
+        return NULL;
+    }
+    *size = reu_size;
+    return reu_ram;
+}
+
 int reu_cart_enabled(void)
 {
     return reu_enabled;

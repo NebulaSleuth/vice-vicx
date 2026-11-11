@@ -58,6 +58,7 @@ int reu_read_snapshot_module(struct snapshot_s *s);
 int reu_write_snapshot_module(struct snapshot_s *s);
 
 int reu_cart_enabled(void);
+uint8_t *reu_get_ram(unsigned int *size);
 void reu_config_setup(uint8_t *rawcart);
 const char *reu_get_file_name(void);
 int reu_bin_attach(const char *filename, uint8_t *rawcart);

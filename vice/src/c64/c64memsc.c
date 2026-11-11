@@ -43,6 +43,7 @@
 #include "c64meminit.h"
 #include "c64memlimit.h"
 #include "c64memrom.h"
+#include "vicx.h"
 #include "c64model.h"
 #include "c64pla.h"
 #include "c64ui.h"
@@ -162,8 +163,51 @@ static void store_watch(uint16_t addr, uint8_t value)
     mem_write_tab[mem_config][addr >> 8](addr, value);
 }
 
+/* VIC-X CPU windows: copies of the current tables with the window pages
+   pointing at VIC-X, so a window takes priority over whatever $01 and the
+   cartridge put in its slot. */
+static read_func_ptr_t vicx_read_tab[2][0x101];
+static store_func_ptr_t vicx_write_tab[2][0x101];
+
+static void vicx_overlay(read_func_ptr_t **rp, store_func_ptr_t **wp, int set)
+{
+    unsigned int page;
+
+    if (!vicx_windows_active()) {
+        return;
+    }
+    memcpy(vicx_read_tab[set], *rp, sizeof(vicx_read_tab[set]));
+    memcpy(vicx_write_tab[set], *wp, sizeof(vicx_write_tab[set]));
+    for (page = 0; page < 0x100; page++) {
+        if (vicx_window_for_page(page) >= 0) {
+            vicx_read_tab[set][page] = vicx_window_read;
+            vicx_write_tab[set][page] = vicx_window_store;
+        }
+    }
+    *rp = vicx_read_tab[set];
+    *wp = vicx_write_tab[set];
+}
+
+static void mem_update_tab_ptrs(int flag);
+
+/* VIC-X: a window was switched on, off or moved */
+static void mem_vicx_update(void)
+{
+    mem_update_tab_ptrs(watchpoints_active);
+    maincpu_resync_limits();
+}
+
 /* called by mem_pla_config_changed(), mem_toggle_watchpoints() */
+static void mem_update_tab_ptrs_stock(int flag);
+
 static void mem_update_tab_ptrs(int flag)
+{
+    mem_update_tab_ptrs_stock(flag);
+    vicx_overlay(&_mem_read_tab_ptr, &_mem_write_tab_ptr, 0);
+    vicx_overlay(&_mem_read_tab_ptr_dummy, &_mem_write_tab_ptr_dummy, 1);
+}
+
+static void mem_update_tab_ptrs_stock(int flag)
 {
     if (flag) {
         _mem_read_tab_ptr = mem_read_tab_watch;
@@ -212,6 +256,8 @@ void mem_toggle_watchpoints(int flag, void *context)
 
 void c64_mem_init(void)
 {
+    vicx_set_mem_hook(mem_vicx_update);
+
     /* Initialize REU BA low interface (FIXME find a better place for this) */
     reu_ba_register(vicii_cycle_reu, vicii_steal_cycles, &maincpu_ba_low_flags, MAINCPU_BA_LOW_REU);
 
@@ -933,11 +979,37 @@ void mem_mmu_translate(unsigned int addr, uint8_t **base, int *start, int *limit
     uint8_t *p = _mem_read_base_tab_ptr[addr >> 8];
     uint32_t limits;
 
+    int windows = vicx_windows_active();
+
+    if (windows && vicx_window_for_page(addr >> 8) >= 0) {
+        *base = NULL;           /* VIC-X window: no direct opcode fetch */
+        *start = 0;
+        *limit = 0;
+        return;
+    }
     if (p != NULL && addr > 1) {
+        int page;
         *base = p;
         limits = mem_read_limit_tab_ptr[addr >> 8];
         *limit = limits & 0xffff;
         *start = limits >> 16;
+        /* VIC-X: the cached range must not reach into a window */
+        for (page = windows ? (int)(addr >> 8) + 1 : 0x100; page <= (*limit >> 8) + 1 && page < 0x100; page++) {
+            if (vicx_window_for_page((unsigned int)page) >= 0) {
+                if (*limit > (page << 8) - 2) {
+                    *limit = (page << 8) - 2;
+                }
+                break;
+            }
+        }
+        for (page = windows ? (int)(addr >> 8) - 1 : -1; page >= (*start >> 8) && page >= 0; page--) {
+            if (vicx_window_for_page((unsigned int)page) >= 0) {
+                if (*start < ((page + 1) << 8)) {
+                    *start = (page + 1) << 8;
+                }
+                break;
+            }
+        }
     } else {
         cartridge_mmu_translate(addr, base, start, limit);
     }
