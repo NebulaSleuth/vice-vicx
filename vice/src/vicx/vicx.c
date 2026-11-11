@@ -53,7 +53,9 @@
 #include <string.h>
 
 #include "cmdline.h"
+#include "interrupt.h"
 #include "log.h"
+#include "maincpu.h"
 #include "monitor.h"
 #include "palette.h"
 #include "resources.h"
@@ -89,6 +91,17 @@ typedef struct vicx_s {
     uint8_t line_ctrl;
     uint8_t line_layer[2][VICX_LAYER_SETUP_SIZE];
     uint8_t line_order;
+
+    /* sprite engine: table latched at the start of the frame, and what
+       the current frame has found so far (published at the next frame) */
+    uint8_t spr_table[VICX_SPR_COUNT * VICX_SPR_ENTRY_SIZE];
+    uint8_t spr_status;
+    unsigned int coll_count;
+    uint8_t coll_pairs[VICX_SPR_COLL_MAX][2];
+    uint8_t coll_seen[VICX_SPR_COUNT * VICX_SPR_COUNT / 8];
+
+    unsigned int int_num;       /* CPU interrupt source */
+    int int_valid;              /* int_num has been registered */
 
     /* emulator-side bookkeeping, not machine state */
     int stock_palette_pending;  /* entries 0-15 still to be filled from the C64 palette */
@@ -163,7 +176,7 @@ static void palette_set_canvas(uint8_t mode)
 
     capture_stock_rgb();
     /* 16 entries suffice for the remap alone; layers need all 256 */
-    n = (mode & (VICX_CTRL_L0 | VICX_CTRL_L1)) ? 256 : 16;
+    n = (mode & (VICX_CTRL_L0 | VICX_CTRL_L1 | VICX_CTRL_SPR)) ? 256 : 16;
     p = palette_create(n, NULL);
     if (p == NULL) {
         return;
@@ -294,6 +307,14 @@ static void port_addr_write(vicx_port_t *p, int byte, uint8_t value)
 /* ------------------------------------------------------------------------- */
 /* registers (unlocked) */
 
+/* The VIC-X IRQ shares the CPU's IRQ line with the VIC-II. */
+static void irq_update(void)
+{
+    if (vicx.int_valid) {
+        maincpu_set_irq(vicx.int_num, (vicx_enabled && (vicx.irq_stat & vicx.irq_en)) ? 1 : 0);
+    }
+}
+
 static uint8_t reg_read(uint16_t reg, int side_effects)
 {
     uint8_t v;
@@ -304,9 +325,9 @@ static uint8_t reg_read(uint16_t reg, int side_effects)
         case 0x42: return VICX_VERSION;
         case 0x43: return VICX_VRAM_SIZE / 0x2000; /* CAP_VRAM, 8 KB units */
         case 0x44: return 0x00;                 /* CAP_XRAM: not in step 1 */
-        case 0x45: return 0x00;                 /* CAP_SPR: not in step 1 */
-        case 0x46: return 0x00;                 /* CAP_SPRLINE: not in step 1 */
-        case 0x47: return 0x03;                 /* CAP_FEAT: tiles, bitmaps */
+        case 0x45: return VICX_SPR_COUNT;       /* CAP_SPR */
+        case 0x46: return VICX_SPR_PER_LINE;    /* CAP_SPRLINE */
+        case 0x47: return 0x07;                 /* CAP_FEAT: tiles, bitmaps, sprites */
         case 0x48: return vicx.ctrl;
         case 0x49: return vicx.irq_en;
         case 0x4a: return vicx.irq_stat;
@@ -345,9 +366,11 @@ static void reg_write(uint16_t reg, uint8_t value)
             break;
         case 0x49:
             vicx.irq_en = value & 0x07;
+            irq_update();
             break;
         case 0x4a:
             vicx.irq_stat &= (uint8_t)~value;
+            irq_update();
             break;
         case 0x4c: case 0x4d: case 0x4e:
             port_addr_write(&vicx.port[0], reg - 0x4c, value);
@@ -494,6 +517,11 @@ void vicx_reset(void)
     vicx.line_ctrl = 0;
     memset(vicx.line_layer, 0, sizeof(vicx.line_layer));
     vicx.line_order = 0;
+    memset(vicx.spr_table, 0, sizeof(vicx.spr_table));
+    vicx.spr_status = 0;
+    vicx.coll_count = 0;
+    memset(vicx.coll_seen, 0, sizeof(vicx.coll_seen));
+    irq_update();
     vicx.stock_palette_pending = 1;
     vicx.palette_dirty = 0;
 }
@@ -507,7 +535,21 @@ void vicx_start_of_frame(void)
     }
     vicx.frame++;
 
-    mode = vicx.ctrl & (VICX_CTRL_PALMAP | VICX_CTRL_L0 | VICX_CTRL_L1);
+    /* results of the frame that just ended */
+    vicx.regspace[VICX_SPRSTAT_OFFSET] = vicx.spr_status;
+    vicx.regspace[VICX_COLLIST_OFFSET] = (uint8_t)vicx.coll_count;
+    memcpy(&vicx.regspace[VICX_COLLIST_OFFSET + 1], vicx.coll_pairs, vicx.coll_count * 2);
+    if (vicx.coll_count > 0) {
+        vicx.irq_stat |= VICX_IRQ_SPRCOL;
+    }
+    vicx.spr_status = 0;
+    vicx.coll_count = 0;
+    memset(vicx.coll_seen, 0, sizeof(vicx.coll_seen));
+    memcpy(vicx.spr_table, &vicx.regspace[VICX_SPRITES_OFFSET], sizeof(vicx.spr_table));
+    vicx.irq_stat |= VICX_IRQ_FRAME;
+    irq_update();
+
+    mode = vicx.ctrl & (VICX_CTRL_PALMAP | VICX_CTRL_L0 | VICX_CTRL_L1 | VICX_CTRL_SPR);
     if (mode) {
         if (vicx.stock_palette_pending) {
             palette_load_stock();
@@ -611,55 +653,205 @@ static void layer_line(const uint8_t *l, unsigned int y, uint8_t *out)
     }
 }
 
-/* Mix the layers into one finished VIC-II line.  `dbuf' is the VIC-II's
-   line of colour indices, `src' says where each VIC-II pixel came from
-   (VICX_SRC_*); both are indexed like vicii.dbuf, where display-window
-   pixel x is at VICX_DBUF_WINDOW_X + x.
+static void coll_add(unsigned int e1, unsigned int e2)
+{
+    unsigned int bit = e1 * VICX_SPR_COUNT + e2;
+
+    if (vicx.coll_seen[bit >> 3] & (1u << (bit & 7))) {
+        return;
+    }
+    vicx.coll_seen[bit >> 3] |= (uint8_t)(1u << (bit & 7));
+    if (vicx.coll_count >= VICX_SPR_COLL_MAX) {
+        vicx.spr_status |= VICX_SPRSTAT_COLLFULL;
+        return;
+    }
+    vicx.coll_pairs[vicx.coll_count][0] = (uint8_t)e1;
+    vicx.coll_pairs[vicx.coll_count][1] = (uint8_t)e2;
+    vicx.coll_count++;
+}
+
+/* Draw the sprites that cover display-window line `y' into front[] and
+   behind[] (palette indices, 0 = transparent; a lower entry is in front of
+   a higher one), apply the per-line limits and record collisions. */
+static void sprite_line(unsigned int y, uint8_t *front, uint8_t *behind)
+{
+    static uint32_t occ[VICX_WINDOW_WIDTH];     /* bit k: k-th sprite drawn here */
+    uint8_t sel_entry[VICX_SPR_PER_LINE];
+    uint8_t sel_mask[VICX_SPR_PER_LINE];
+    unsigned int nsel = 0, pixels = 0, e, x;
+    uint32_t any = 0;
+
+    memset(front, 0, VICX_WINDOW_WIDTH);
+    memset(behind, 0, VICX_WINDOW_WIDTH);
+    memset(occ, 0, sizeof(occ));
+
+    for (e = 0; e < VICX_SPR_COUNT; e++) {
+        const uint8_t *s = &vicx.spr_table[e * VICX_SPR_ENTRY_SIZE];
+        unsigned int w, h, sw, row, rowbytes, i, sx0;
+        int dw, bpp8;
+        uint32_t rowaddr;
+        uint8_t bank, *dst;
+
+        if (!(s[3] & 0x04)) {
+            continue;                           /* off */
+        }
+        h = 8u << ((s[1] >> 4) & 3);
+        row = (y - (unsigned int)(s[2] | ((s[3] & 3) << 8))) & 0x3ff;
+        if (row >= h) {
+            continue;                           /* not on this line */
+        }
+        w = 8u << ((s[1] >> 2) & 3);
+        dw = (s[6] & 0x20) ? 1 : 0;
+        sw = w << dw;
+        if (nsel >= VICX_SPR_PER_LINE || pixels + sw > VICX_SPR_PIXELS_PER_LINE) {
+            vicx.spr_status |= VICX_SPRSTAT_OVERFLOW;
+            break;                              /* this and every higher entry drop out */
+        }
+        pixels += sw;
+
+        if (s[1] & 0x80) {
+            row = h - 1 - row;                  /* flip Y */
+        }
+        bpp8 = (s[6] & 0x10) ? 1 : 0;
+        rowbytes = bpp8 ? w : w / 2;
+        rowaddr = (uint32_t)(s[4] | (s[5] << 8)) * 32 + row * rowbytes;
+        bank = (uint8_t)((s[6] & 0x0f) << 4);
+        dst = (s[3] & 0x08) ? behind : front;
+        sx0 = (unsigned int)(s[0] | ((s[1] & 3) << 8));
+
+        for (i = 0; i < sw; i++) {
+            unsigned int sx = (sx0 + i) & 0x3ff;
+            unsigned int px;
+            uint8_t c;
+
+            if (sx >= VICX_WINDOW_WIDTH) {
+                continue;
+            }
+            px = i >> dw;
+            if (s[1] & 0x40) {
+                px = w - 1 - px;                /* flip X */
+            }
+            if (bpp8) {
+                c = vram_at(rowaddr + px);
+            } else {
+                uint8_t b = vram_at(rowaddr + (px >> 1));
+                uint8_t n = (px & 1) ? (b & 0x0f) : (b >> 4);
+                c = n ? (uint8_t)(bank | n) : 0;
+            }
+            if (c == 0) {
+                continue;
+            }
+            if (dst[sx] == 0) {
+                dst[sx] = c;
+            }
+            if (any & occ[sx]) {
+                any |= 0x80000000u;             /* this line has an overlap */
+            }
+            occ[sx] |= 1u << nsel;
+            any |= 1u << nsel;
+        }
+        sel_entry[nsel] = (uint8_t)e;
+        sel_mask[nsel] = (uint8_t)(s[3] >> 4);
+        nsel++;
+    }
+
+    if (!(any & 0x80000000u)) {
+        return;
+    }
+    for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
+        uint32_t o = occ[x];
+        unsigned int i, j;
+
+        if ((o & (o - 1)) == 0) {
+            continue;                           /* fewer than two sprites here */
+        }
+        for (i = 0; i < nsel; i++) {
+            if (!(o & (1u << i))) {
+                continue;
+            }
+            for (j = i + 1; j < nsel; j++) {
+                if ((o & (1u << j)) && (sel_mask[i] & sel_mask[j])) {
+                    coll_add(sel_entry[i], sel_entry[j]);
+                }
+            }
+        }
+    }
+}
+
+/* Mix the layers and the sprite engine into one finished VIC-II line.
+   `dbuf' is the VIC-II's line of colour indices, `src' says where each
+   VIC-II pixel came from (VICX_SRC_*); both are indexed like vicii.dbuf,
+   where display-window pixel x is at VICX_DBUF_WINDOW_X + x.
 
    Sources are tried front to back by their priority in the order register
-   (higher in front); equal priorities fall back to the fixed order VIC-II,
-   layer 0, layer 1.  The border is always on top.  Where every source is
-   transparent, the VIC-II's $D021 pixel stays. */
+   (higher in front); equal priorities fall back to the fixed order sprite
+   engine, VIC-II, layer 0, layer 1.  Sprites marked "behind" are drawn one
+   step back, right behind the source that follows the sprite engine.  The
+   border is always on top.  Where every source is transparent, the
+   VIC-II's $D021 pixel stays. */
+enum { SRC_L0, SRC_L1, SRC_VIC, SRC_SPR, SRC_SPR_BEHIND };
+
 void vicx_mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
 {
-    static uint8_t lbuf[2][VICX_WINDOW_WIDTH];
+    static uint8_t buf[5][VICX_WINDOW_WIDTH];   /* indexed by SRC_*; VIC unused */
     uint8_t ctrl = vicx.line_ctrl;
-    int on[2];
-    int order[3];       /* front to back: 0 = layer 0, 1 = layer 1, 2 = VIC-II */
-    int pri[3];
+    int on[5];
+    int order[4];
+    int seq[5];
+    int pri[4];
+    int nseq = 0, pending = 0;
     int bgtrans;
     unsigned int x, y;
     int i, j;
 
-    if (!vicx_enabled || !(ctrl & (VICX_CTRL_L0 | VICX_CTRL_L1))) {
+    if (!vicx_enabled || !(ctrl & (VICX_CTRL_L0 | VICX_CTRL_L1 | VICX_CTRL_SPR))) {
         return;
     }
     if (line < VICX_WINDOW_FIRST_LINE || line >= VICX_WINDOW_FIRST_LINE + VICX_WINDOW_HEIGHT) {
         return;
     }
     y = line - VICX_WINDOW_FIRST_LINE;
-    on[0] = (ctrl & VICX_CTRL_L0) != 0;
-    on[1] = (ctrl & VICX_CTRL_L1) != 0;
+    on[SRC_L0] = (ctrl & VICX_CTRL_L0) != 0;
+    on[SRC_L1] = (ctrl & VICX_CTRL_L1) != 0;
+    on[SRC_VIC] = 1;
+    on[SRC_SPR] = on[SRC_SPR_BEHIND] = (ctrl & VICX_CTRL_SPR) != 0;
     bgtrans = (ctrl & VICX_CTRL_BGTRANS) != 0;
 
-    pri[0] = vicx.line_order & 3;
-    pri[1] = (vicx.line_order >> 2) & 3;
-    pri[2] = (vicx.line_order >> 4) & 3;
-    order[0] = 2;
-    order[1] = 0;
-    order[2] = 1;
-    for (i = 1; i < 3; i++) {       /* stable insertion sort, high priority first */
+    pri[SRC_L0] = vicx.line_order & 3;
+    pri[SRC_L1] = (vicx.line_order >> 2) & 3;
+    pri[SRC_VIC] = (vicx.line_order >> 4) & 3;
+    pri[SRC_SPR] = (vicx.line_order >> 6) & 3;
+    order[0] = SRC_SPR;
+    order[1] = SRC_VIC;
+    order[2] = SRC_L0;
+    order[3] = SRC_L1;
+    for (i = 1; i < 4; i++) {       /* stable insertion sort, high priority first */
         int s = order[i];
         for (j = i; j > 0 && pri[order[j - 1]] < pri[s]; j--) {
             order[j] = order[j - 1];
         }
         order[j] = s;
     }
+    for (i = 0; i < 4; i++) {
+        seq[nseq++] = order[i];
+        if (order[i] == SRC_SPR) {
+            pending = 1;
+        } else if (pending) {
+            seq[nseq++] = SRC_SPR_BEHIND;
+            pending = 0;
+        }
+    }
+    if (pending) {
+        seq[nseq++] = SRC_SPR_BEHIND;
+    }
 
     for (i = 0; i < 2; i++) {
         if (on[i]) {
-            layer_line(vicx.line_layer[i], y, lbuf[i]);
+            layer_line(vicx.line_layer[i], y, buf[i]);
         }
+    }
+    if (on[SRC_SPR]) {
+        sprite_line(y, buf[SRC_SPR], buf[SRC_SPR_BEHIND]);
     }
 
     dbuf += VICX_DBUF_WINDOW_X;
@@ -668,18 +860,24 @@ void vicx_mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
         if (src[x] == VICX_SRC_BORDER) {
             continue;
         }
-        for (i = 0; i < 3; i++) {
-            int s = order[i];
-            if (s == 2) {
+        for (i = 0; i < nseq; i++) {
+            int s = seq[i];
+            if (s == SRC_VIC) {
                 if (!(bgtrans && src[x] == VICX_SRC_BG)) {
                     break;          /* opaque VIC-II pixel: keep it */
                 }
-            } else if (on[s] && lbuf[s][x] != 0) {
-                dbuf[x] = lbuf[s][x];
+            } else if (on[s] && buf[s][x] != 0) {
+                dbuf[x] = buf[s][x];
                 break;
             }
         }
     }
+}
+
+void vicx_irq_init(void)
+{
+    vicx.int_num = interrupt_cpu_status_int_new(maincpu_int_status, "VICX");
+    vicx.int_valid = 1;
 }
 
 int vicx_is_enabled(void)
@@ -845,6 +1043,10 @@ int vicx_snapshot_read_module(snapshot_t *s)
     }
     vicx.stock_palette_pending = 0;
     vicx.palette_dirty = 1;     /* re-apply the remap on the next frame */
+    memcpy(vicx.spr_table, &vicx.regspace[VICX_SPRITES_OFFSET], sizeof(vicx.spr_table));
+    if (vicx.int_valid && (vicx.irq_stat & vicx.irq_en)) {
+        interrupt_restore_irq(maincpu_int_status, vicx.int_num, 1);
+    }
     return snapshot_module_close(m);
 
 fail:

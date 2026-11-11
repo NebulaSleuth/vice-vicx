@@ -32,6 +32,7 @@
 #include "types.h"
 #include "vicii-irq.h"
 #include "viciitypes.h"
+#include "vicx.h"
 
 void vicii_irq_set_line(void)
 {
@@ -123,4 +124,5 @@ void vicii_irq_raster_trigger(void)
 void vicii_irq_init(void)
 {
     vicii.int_num = interrupt_cpu_status_int_new(maincpu_int_status, "VICII");
+    vicx_irq_init();
 }

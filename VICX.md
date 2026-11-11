@@ -30,10 +30,11 @@ to the VIC-II. Enabled, VIC-X still starts locked and only answers at
 
 | File | Change |
 |------|--------|
-| `src/vicx/vicx.c`, `vicx.h` | the VIC-X block: unlock, registers, ports, VRAM, register space, palette, snapshot module `VICX` |
+| `src/vicx/vicx.c`, `vicx.h` | the VIC-X block: unlock, registers, ports, VRAM, register space, palette, layers, sprite engine, IRQ, snapshot module `VICX` |
 | `src/c64/c64.c` | `$D000-$D0FF` I/O device passes the full offset to VIC-X (mask `$ff`); `$D100-$D3FF` mirror writes cancel a partial unlock |
 | `src/c64/c64-snapshot.c` | writes/reads the `VICX` module (only written while VIC-X is enabled) |
 | `src/viciisc/vicii.c` | `vicii_reset()` resets and locks VIC-X |
+| `src/viciisc/vicii-irq.c` | registers VIC-X as its own source on the CPU's IRQ line |
 | `src/viciisc/vicii-cycle.c` | start of frame: FRAME counter and canvas palette update; start of line: VIC-X latches CTRL and the layer setup |
 | `src/viciisc/vicii-draw-cycle.c`, `viciitypes.h` | `vicii.xbgbuf[]`: where each line-buffer pixel came from (foreground, `$D021`, border) |
 | `src/viciisc/vicii.c` (`vicii_raster_draw_handler`) | mixes the layers into the finished line before it is drawn |
@@ -66,5 +67,10 @@ colours unless the remap is on.
   line show on the whole line rather than from the pixel being drawn.
 - With the CRT emulation renderer, very saturated colours are desaturated a
   little to keep its tables in range; screenshots show exact RGB.
-- XRAM windows, IRQs, DMA and the sprite engine are not implemented; their
-  registers latch values or read 0, and the capability registers say so.
+- The sprite engine is evaluated when the line is mixed, at its end, like
+  the layers. The sprite table is latched at the start of each frame, but a
+  snapshot does not keep the latched copy: after loading, the engine shows
+  the current table until the next frame. Collisions found in a partly
+  emulated frame before a snapshot are lost.
+- XRAM windows and DMA are not implemented; their registers latch values or
+  read 0, and the capability registers say so.

@@ -1,6 +1,7 @@
 /*
  * vicx.h - VIC-X graphics and memory extension (unlock, registers, VRAM
- *          ports, palette, VIC-II colour remap, tile and bitmap layers).
+ *          ports, palette, VIC-II colour remap, tile and bitmap layers, sprite
+ *          engine).
  *
  * This file is part of VICE, the Versatile Commodore Emulator.
  * See README for copyright notice.
@@ -46,6 +47,23 @@ struct snapshot_s;
 #define VICX_LAYER0_OFFSET      0x800   /* $20800 */
 #define VICX_LAYER1_OFFSET      0x820   /* $20820 */
 #define VICX_ORDER_OFFSET       0x840   /* $20840: layer order */
+#define VICX_SPRSTAT_OFFSET     0x841   /* $20841: sprite engine status */
+#define VICX_SPRITES_OFFSET     0x400   /* $20400: sprite table */
+#define VICX_COLLIST_OFFSET     0x900   /* $20900: collision list */
+
+/* Sprite engine (spec "Sprite engine"; VICE uses the target limits) */
+#define VICX_SPR_COUNT          128
+#define VICX_SPR_ENTRY_SIZE     8
+#define VICX_SPR_PER_LINE       32
+#define VICX_SPR_PIXELS_PER_LINE 640
+#define VICX_SPR_COLL_MAX       127     /* pairs in the collision list */
+#define VICX_SPRSTAT_OVERFLOW   0x01    /* a line dropped sprites */
+#define VICX_SPRSTAT_COLLFULL   0x02    /* more pairs than the list holds */
+
+/* IRQ_EN / IRQ_STAT bits */
+#define VICX_IRQ_SPRCOL         0x01
+#define VICX_IRQ_DMA            0x02
+#define VICX_IRQ_FRAME          0x04
 #define VICX_LAYER_SETUP_SIZE   32
 #define VICX_LMODE_MASK         0x03
 #define VICX_LMODE_TILE4        0x00
@@ -85,6 +103,7 @@ void vicx_resources_shutdown(void);
 int vicx_cmdline_options_init(void);
 
 /* Machine hooks */
+void vicx_irq_init(void);
 void vicx_reset(void);
 void vicx_start_of_frame(void);
 void vicx_start_of_line(void);
