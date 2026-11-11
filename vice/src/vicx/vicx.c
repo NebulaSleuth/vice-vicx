@@ -556,9 +556,13 @@ void vicx_mix_line(uint8_t *dbuf, const uint8_t *bg, unsigned int line)
 
     dbuf += VICX_DBUF_WINDOW_X;
     bg += VICX_DBUF_WINDOW_X;
+    /* colour 0 is transparent: the VIC-II background pixel ($D021) stays */
     for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
         if (bg[x]) {
-            dbuf[x] = vicx.vram[(row + (x >> dw)) & (VICX_VRAM_SIZE - 1)];
+            uint8_t c = vicx.vram[(row + (x >> dw)) & (VICX_VRAM_SIZE - 1)];
+            if (c != 0) {
+                dbuf[x] = c;
+            }
         }
     }
 }

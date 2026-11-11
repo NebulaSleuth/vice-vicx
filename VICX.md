@@ -47,6 +47,7 @@ The VIC-II writes one 8-bit colour index per pixel into a line buffer
 (`vicii.dbuf`, display-window pixel 0 at index 136). At the end of each line
 VIC-X writes layer pixels into that buffer as their VIC-X palette index,
 wherever the VIC-II pixel came from `$D021` and CTRL bits 0 and 4 are set.
+Layer colour 0 is transparent and leaves the `$D021` pixel in place.
 While the remap or layer 0 is on, the canvas palette is a VIC-X one: 16
 entries for the remap alone, 256 with a layer; entries 0-15 are the stock
 colours unless the remap is on.
