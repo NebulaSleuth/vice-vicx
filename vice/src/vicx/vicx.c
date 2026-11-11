@@ -535,16 +535,6 @@ void vicx_start_of_frame(void)
     }
     vicx.frame++;
 
-    /* results of the frame that just ended */
-    vicx.regspace[VICX_SPRSTAT_OFFSET] = vicx.spr_status;
-    vicx.regspace[VICX_COLLIST_OFFSET] = (uint8_t)vicx.coll_count;
-    memcpy(&vicx.regspace[VICX_COLLIST_OFFSET + 1], vicx.coll_pairs, vicx.coll_count * 2);
-    if (vicx.coll_count > 0) {
-        vicx.irq_stat |= VICX_IRQ_SPRCOL;
-    }
-    vicx.spr_status = 0;
-    vicx.coll_count = 0;
-    memset(vicx.coll_seen, 0, sizeof(vicx.coll_seen));
     memcpy(vicx.spr_table, &vicx.regspace[VICX_SPRITES_OFFSET], sizeof(vicx.spr_table));
     vicx.irq_stat |= VICX_IRQ_FRAME;
     irq_update();
@@ -791,7 +781,7 @@ static void sprite_line(unsigned int y, uint8_t *front, uint8_t *behind)
    VIC-II's $D021 pixel stays. */
 enum { SRC_L0, SRC_L1, SRC_VIC, SRC_SPR, SRC_SPR_BEHIND };
 
-void vicx_mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
+static void mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
 {
     static uint8_t buf[5][VICX_WINDOW_WIDTH];   /* indexed by SRC_*; VIC unused */
     uint8_t ctrl = vicx.line_ctrl;
@@ -871,6 +861,34 @@ void vicx_mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
                 break;
             }
         }
+    }
+}
+
+/* After the last display line nothing more is drawn: publish the frame's
+   sprite engine status and collision list, at the start of the vertical
+   blank. */
+static void sprite_frame_done(void)
+{
+    vicx.regspace[VICX_SPRSTAT_OFFSET] = vicx.spr_status;
+    vicx.regspace[VICX_COLLIST_OFFSET] = (uint8_t)vicx.coll_count;
+    memcpy(&vicx.regspace[VICX_COLLIST_OFFSET + 1], vicx.coll_pairs, vicx.coll_count * 2);
+    if (vicx.coll_count > 0) {
+        vicx.irq_stat |= VICX_IRQ_SPRCOL;
+        irq_update();
+    }
+    vicx.spr_status = 0;
+    vicx.coll_count = 0;
+    memset(vicx.coll_seen, 0, sizeof(vicx.coll_seen));
+}
+
+void vicx_mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
+{
+    if (!vicx_enabled) {
+        return;
+    }
+    mix_line(dbuf, src, line);
+    if (line == VICX_WINDOW_FIRST_LINE + VICX_WINDOW_HEIGHT - 1) {
+        sprite_frame_done();
     }
 }
 
