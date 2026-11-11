@@ -954,7 +954,8 @@ static void sprite_line(unsigned int y, uint8_t *front, uint8_t *behind, unsigne
 {
     static uint32_t occ[VICX_WINDOW_MAX_WIDTH];     /* bit k: k-th sprite drawn here */
     uint8_t sel_entry[VICX_SPR_PER_LINE];
-    uint8_t sel_mask[VICX_SPR_PER_LINE];
+    uint8_t sel_member[VICX_SPR_PER_LINE];   /* groups the sprite belongs to */
+    uint8_t sel_hits[VICX_SPR_PER_LINE];     /* groups it collides with */
     unsigned int nsel = 0, pixels = 0, e, x;
     uint32_t any = 0;
 
@@ -1028,7 +1029,8 @@ static void sprite_line(unsigned int y, uint8_t *front, uint8_t *behind, unsigne
             any |= 1u << nsel;
         }
         sel_entry[nsel] = (uint8_t)e;
-        sel_mask[nsel] = (uint8_t)(s[3] >> 4);
+        sel_member[nsel] = (uint8_t)(s[3] >> 4);
+        sel_hits[nsel] = (s[7] & 0x0f) ? (uint8_t)(s[7] & 0x0f) : sel_member[nsel];
         nsel++;
     }
 
@@ -1047,7 +1049,8 @@ static void sprite_line(unsigned int y, uint8_t *front, uint8_t *behind, unsigne
                 continue;
             }
             for (j = i + 1; j < nsel; j++) {
-                if ((o & (1u << j)) && (sel_mask[i] & sel_mask[j])) {
+                if ((o & (1u << j))
+                    && ((sel_member[i] & sel_hits[j]) || (sel_member[j] & sel_hits[i]))) {
                     coll_add(sel_entry[i], sel_entry[j]);
                 }
             }
