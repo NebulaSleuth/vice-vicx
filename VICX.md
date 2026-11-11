@@ -35,8 +35,8 @@ to the VIC-II. Enabled, VIC-X still starts locked and only answers at
 | `src/c64/c64-snapshot.c` | writes/reads the `VICX` module (only written while VIC-X is enabled) |
 | `src/viciisc/vicii.c` | `vicii_reset()` resets and locks VIC-X |
 | `src/viciisc/vicii-cycle.c` | start of frame: FRAME counter and canvas palette update; start of line: VIC-X latches CTRL and the layer setup |
-| `src/viciisc/vicii-draw-cycle.c`, `viciitypes.h` | `vicii.xbgbuf[]`: flags the line-buffer pixels drawn in the `$D021` colour |
-| `src/viciisc/vicii.c` (`vicii_raster_draw_handler`) | mixes layer 0 into the finished line before it is drawn |
+| `src/viciisc/vicii-draw-cycle.c`, `viciitypes.h` | `vicii.xbgbuf[]`: where each line-buffer pixel came from (foreground, `$D021`, border) |
+| `src/viciisc/vicii.c` (`vicii_raster_draw_handler`) | mixes the layers into the finished line before it is drawn |
 | `src/viciisc/vicii-resources.c`, `vicii-cmdline-options.c` | register the resource and options |
 | `src/video/video-color.c`, `src/video.h` | `video_color_set_palette_override()`: show exact RGB values (16 or 256 entries) instead of the configured palette; chroma is scaled down where the CRT renderer would overflow |
 | build files | `src/vicx/Makefile.am`, `configure.ac`, `src/Makefile.am` (linked into x64sc, xscpu64, x64) |
@@ -44,11 +44,13 @@ to the VIC-II. Enabled, VIC-X still starts locked and only answers at
 ## Colour path
 
 The VIC-II writes one 8-bit colour index per pixel into a line buffer
-(`vicii.dbuf`, display-window pixel 0 at index 136). At the end of each line
-VIC-X writes layer pixels into that buffer as their VIC-X palette index,
-wherever the VIC-II pixel came from `$D021` and CTRL bits 0 and 4 are set.
-Layer colour 0 is transparent and leaves the `$D021` pixel in place.
-While the remap or layer 0 is on, the canvas palette is a VIC-X one: 16
+(`vicii.dbuf`, display-window pixel 0 at index 136). The draw code also records
+where each pixel came from (`vicii.xbgbuf`: foreground, `$D021` background or
+`$D020` border). At the end of each line VIC-X draws the enabled layers and
+mixes them into that buffer as VIC-X palette indices, front to back by the
+order register; a VIC-II pixel is transparent only where it came from `$D021`
+and CTRL bit 4 is set, the border always wins, and where every source is
+transparent the `$D021` pixel stays. While the remap or a layer is on, the canvas palette is a VIC-X one: 16
 entries for the remap alone, 256 with a layer; entries 0-15 are the stock
 colours unless the remap is on.
 
@@ -64,6 +66,5 @@ colours unless the remap is on.
   line show on the whole line rather than from the pixel being drawn.
 - With the CRT emulation renderer, very saturated colours are desaturated a
   little to keep its tables in range; screenshots show exact RGB.
-- Only layer 0 in 8-bit bitmap mode is drawn. XRAM windows, IRQs, DMA, tiles,
-  layer 1 and the sprite engine are not implemented; their registers latch
-  values or read 0, and the capability registers say so.
+- XRAM windows, IRQs, DMA and the sprite engine are not implemented; their
+  registers latch values or read 0, and the capability registers say so.

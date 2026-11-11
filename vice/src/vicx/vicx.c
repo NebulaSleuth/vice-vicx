@@ -87,7 +87,8 @@ typedef struct vicx_s {
 
     /* values latched at the start of the current raster line */
     uint8_t line_ctrl;
-    uint8_t line_layer0[VICX_LAYER_SETUP_SIZE];
+    uint8_t line_layer[2][VICX_LAYER_SETUP_SIZE];
+    uint8_t line_order;
 
     /* emulator-side bookkeeping, not machine state */
     int stock_palette_pending;  /* entries 0-15 still to be filled from the C64 palette */
@@ -162,7 +163,7 @@ static void palette_set_canvas(uint8_t mode)
 
     capture_stock_rgb();
     /* 16 entries suffice for the remap alone; layers need all 256 */
-    n = (mode & VICX_CTRL_L0) ? 256 : 16;
+    n = (mode & (VICX_CTRL_L0 | VICX_CTRL_L1)) ? 256 : 16;
     p = palette_create(n, NULL);
     if (p == NULL) {
         return;
@@ -305,7 +306,7 @@ static uint8_t reg_read(uint16_t reg, int side_effects)
         case 0x44: return 0x00;                 /* CAP_XRAM: not in step 1 */
         case 0x45: return 0x00;                 /* CAP_SPR: not in step 1 */
         case 0x46: return 0x00;                 /* CAP_SPRLINE: not in step 1 */
-        case 0x47: return 0x02;                 /* CAP_FEAT: bitmap (layer 0, 8-bit) */
+        case 0x47: return 0x03;                 /* CAP_FEAT: tiles, bitmaps */
         case 0x48: return vicx.ctrl;
         case 0x49: return vicx.irq_en;
         case 0x4a: return vicx.irq_stat;
@@ -491,7 +492,8 @@ void vicx_reset(void)
        VRAM keeps its contents across a reset, like C64 RAM */
     memset(vicx.regspace, 0, sizeof(vicx.regspace));
     vicx.line_ctrl = 0;
-    memset(vicx.line_layer0, 0, sizeof(vicx.line_layer0));
+    memset(vicx.line_layer, 0, sizeof(vicx.line_layer));
+    vicx.line_order = 0;
     vicx.stock_palette_pending = 1;
     vicx.palette_dirty = 0;
 }
@@ -505,7 +507,7 @@ void vicx_start_of_frame(void)
     }
     vicx.frame++;
 
-    mode = vicx.ctrl & (VICX_CTRL_PALMAP | VICX_CTRL_L0);
+    mode = vicx.ctrl & (VICX_CTRL_PALMAP | VICX_CTRL_L0 | VICX_CTRL_L1);
     if (mode) {
         if (vicx.stock_palette_pending) {
             palette_load_stock();
@@ -524,44 +526,157 @@ void vicx_start_of_line(void)
         return;
     }
     vicx.line_ctrl = vicx.ctrl;
-    memcpy(vicx.line_layer0, &vicx.regspace[VICX_LAYER0_OFFSET], VICX_LAYER_SETUP_SIZE);
+    memcpy(vicx.line_layer[0], &vicx.regspace[VICX_LAYER0_OFFSET], VICX_LAYER_SETUP_SIZE);
+    memcpy(vicx.line_layer[1], &vicx.regspace[VICX_LAYER1_OFFSET], VICX_LAYER_SETUP_SIZE);
+    vicx.line_order = vicx.regspace[VICX_ORDER_OFFSET];
 }
 
-/* Mix layer 0 into one finished VIC-II line.  `dbuf' is the VIC-II's line of
-   colour indices, `bg' flags the pixels drawn in the $D021 colour; both are
-   indexed like vicii.dbuf, where display-window pixel x is at
-   VICX_DBUF_WINDOW_X + x. */
-void vicx_mix_line(uint8_t *dbuf, const uint8_t *bg, unsigned int line)
+static inline uint8_t vram_at(uint32_t addr)
 {
-    const uint8_t *l = vicx.line_layer0;
-    uint32_t row;
-    unsigned int y, x, stride;
-    int dw;
+    return vicx.vram[addr & (VICX_VRAM_SIZE - 1)];
+}
 
-    if (!vicx_enabled
-        || (vicx.line_ctrl & (VICX_CTRL_L0 | VICX_CTRL_BGTRANS)) != (VICX_CTRL_L0 | VICX_CTRL_BGTRANS)) {
-        return;     /* layer off, or hidden behind an opaque VIC-II picture */
+/* Draw one line of a layer into out[0..319] as palette indices; 0 means
+   transparent.  `l' is the layer setup latched for this line, `y' the
+   display-window line (0-199). */
+static void layer_line(const uint8_t *l, unsigned int y, uint8_t *out)
+{
+    unsigned int mode = l[0] & VICX_LMODE_MASK;
+    int dw = (l[0] & VICX_LMODE_DOUBLEWIDTH) ? 1 : 0;
+    uint32_t base = (uint32_t)(l[2] | (l[3] << 8) | (l[4] << 16));
+    unsigned int x;
+
+    if (mode == VICX_LMODE_BITMAP8 || mode == VICX_LMODE_BITMAP4) {
+        /* bitmaps ignore scroll X/Y; they scroll by moving the base */
+        unsigned int stride = (unsigned int)(l[12] | (l[13] << 8)) & VICX_STRIDE_MASK;
+        uint32_t row = base + y * stride;
+
+        if (mode == VICX_LMODE_BITMAP8) {
+            for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
+                out[x] = vram_at(row + (x >> dw));
+            }
+        } else {
+            uint8_t bank = (uint8_t)((l[14] & 0x0f) << 4);
+            for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
+                unsigned int lx = x >> dw;
+                uint8_t b = vram_at(row + (lx >> 1));
+                uint8_t n = (lx & 1) ? (b & 0x0f) : (b >> 4);   /* high nibble = left pixel */
+                out[x] = n ? (uint8_t)(bank | n) : 0;
+            }
+        }
+    } else {
+        int big = (l[0] & VICX_LMODE_TILE16) ? 1 : 0;
+        unsigned int tsize = big ? 16 : 8;
+        unsigned int tshift = big ? 4 : 3;
+        int bpp8 = (mode == VICX_LMODE_TILE8);
+        unsigned int tbytes = (tsize * tsize) >> (bpp8 ? 0 : 1);
+        unsigned int mapw = 32u << (l[1] & 3);          /* in tiles */
+        unsigned int maph = 32u << ((l[1] >> 2) & 3);
+        uint32_t tilebase = (uint32_t)(l[5] | (l[6] << 8) | (l[7] << 16));
+        unsigned int sx = (unsigned int)(l[8] | (l[9] << 8)) & VICX_SCROLL_MASK;
+        unsigned int sy = (unsigned int)(l[10] | (l[11] << 8)) & VICX_SCROLL_MASK;
+        unsigned int ly = (y + sy) & ((maph << tshift) - 1);
+        unsigned int py = ly & (tsize - 1);
+        uint32_t maprow = base + (uint32_t)(ly >> tshift) * mapw * 2;
+        unsigned int lastt = 0xffffffffu;
+        unsigned int entry = 0;
+        uint32_t trow = 0;
+        uint8_t bank = 0;
+
+        for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
+            unsigned int lx = ((x >> dw) + sx) & ((mapw << tshift) - 1);
+            unsigned int tx = lx >> tshift;
+            unsigned int px = lx & (tsize - 1);
+
+            if (tx != lastt) {
+                unsigned int row;
+                lastt = tx;
+                entry = (unsigned int)(vram_at(maprow + tx * 2) | (vram_at(maprow + tx * 2 + 1) << 8));
+                row = (entry & VICX_TILE_FLIPY) ? (tsize - 1 - py) : py;
+                trow = tilebase + (uint32_t)(entry & VICX_TILE_NUMBER) * tbytes
+                       + ((row * tsize) >> (bpp8 ? 0 : 1));
+                bank = (uint8_t)((entry >> 12) << 4);
+            }
+            if (entry & VICX_TILE_FLIPX) {
+                px = tsize - 1 - px;
+            }
+            if (bpp8) {
+                out[x] = vram_at(trow + px);
+            } else {
+                uint8_t b = vram_at(trow + (px >> 1));
+                uint8_t n = (px & 1) ? (b & 0x0f) : (b >> 4);
+                out[x] = n ? (uint8_t)(bank | n) : 0;
+            }
+        }
+    }
+}
+
+/* Mix the layers into one finished VIC-II line.  `dbuf' is the VIC-II's
+   line of colour indices, `src' says where each VIC-II pixel came from
+   (VICX_SRC_*); both are indexed like vicii.dbuf, where display-window
+   pixel x is at VICX_DBUF_WINDOW_X + x.
+
+   Sources are tried front to back by their priority in the order register
+   (higher in front); equal priorities fall back to the fixed order VIC-II,
+   layer 0, layer 1.  The border is always on top.  Where every source is
+   transparent, the VIC-II's $D021 pixel stays. */
+void vicx_mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
+{
+    static uint8_t lbuf[2][VICX_WINDOW_WIDTH];
+    uint8_t ctrl = vicx.line_ctrl;
+    int on[2];
+    int order[3];       /* front to back: 0 = layer 0, 1 = layer 1, 2 = VIC-II */
+    int pri[3];
+    int bgtrans;
+    unsigned int x, y;
+    int i, j;
+
+    if (!vicx_enabled || !(ctrl & (VICX_CTRL_L0 | VICX_CTRL_L1))) {
+        return;
     }
     if (line < VICX_WINDOW_FIRST_LINE || line >= VICX_WINDOW_FIRST_LINE + VICX_WINDOW_HEIGHT) {
         return;
     }
-    if ((l[0] & VICX_LMODE_MASK) != VICX_LMODE_BITMAP8) {
-        return;     /* tile and 4-bit modes come in later steps */
+    y = line - VICX_WINDOW_FIRST_LINE;
+    on[0] = (ctrl & VICX_CTRL_L0) != 0;
+    on[1] = (ctrl & VICX_CTRL_L1) != 0;
+    bgtrans = (ctrl & VICX_CTRL_BGTRANS) != 0;
+
+    pri[0] = vicx.line_order & 3;
+    pri[1] = (vicx.line_order >> 2) & 3;
+    pri[2] = (vicx.line_order >> 4) & 3;
+    order[0] = 2;
+    order[1] = 0;
+    order[2] = 1;
+    for (i = 1; i < 3; i++) {       /* stable insertion sort, high priority first */
+        int s = order[i];
+        for (j = i; j > 0 && pri[order[j - 1]] < pri[s]; j--) {
+            order[j] = order[j - 1];
+        }
+        order[j] = s;
     }
 
-    y = line - VICX_WINDOW_FIRST_LINE;
-    stride = (unsigned int)(l[12] | (l[13] << 8)) & 0x7ff;
-    dw = (l[0] & VICX_LMODE_DOUBLEWIDTH) ? 1 : 0;
-    row = (uint32_t)(l[2] | (l[3] << 8) | (l[4] << 16)) + y * stride;
+    for (i = 0; i < 2; i++) {
+        if (on[i]) {
+            layer_line(vicx.line_layer[i], y, lbuf[i]);
+        }
+    }
 
     dbuf += VICX_DBUF_WINDOW_X;
-    bg += VICX_DBUF_WINDOW_X;
-    /* colour 0 is transparent: the VIC-II background pixel ($D021) stays */
+    src += VICX_DBUF_WINDOW_X;
     for (x = 0; x < VICX_WINDOW_WIDTH; x++) {
-        if (bg[x]) {
-            uint8_t c = vicx.vram[(row + (x >> dw)) & (VICX_VRAM_SIZE - 1)];
-            if (c != 0) {
-                dbuf[x] = c;
+        if (src[x] == VICX_SRC_BORDER) {
+            continue;
+        }
+        for (i = 0; i < 3; i++) {
+            int s = order[i];
+            if (s == 2) {
+                if (!(bgtrans && src[x] == VICX_SRC_BG)) {
+                    break;          /* opaque VIC-II pixel: keep it */
+                }
+            } else if (on[s] && lbuf[s][x] != 0) {
+                dbuf[x] = lbuf[s][x];
+                break;
             }
         }
     }

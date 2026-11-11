@@ -33,6 +33,7 @@
 #include "vicii-chip-model.h"
 #include "vicii-draw-cycle.h"
 #include "viciitypes.h"
+#include "vicx.h"
 
 /* disable for debugging */
 #define DRAW_INLINE inline
@@ -111,6 +112,12 @@ static uint8_t pri_buffer[8];
 static uint8_t pixel_buffer[8];
 /* VIC-X: background flag for each pixel_buffer entry (6569 colour latency) */
 static uint8_t pixel_bg[8];
+
+/* VIC-X: classify a colour source before it is resolved (VICX_SRC_*) */
+static DRAW_INLINE uint8_t vicx_src(uint8_t c)
+{
+    return (c == COL_D021) ? VICX_SRC_BG : (c == COL_D020) ? VICX_SRC_BORDER : VICX_SRC_FG;
+}
 
 /* color resolution registers */
 static uint8_t cregs[0x2f];
@@ -597,7 +604,7 @@ static DRAW_INLINE void draw_colors_6569(int offs, int i)
 
     /* resolve any unresolved colors */
     lookup_index = (i + 1) & 0x07;
-    pixel_bg[lookup_index] = (pixel_buffer[lookup_index] == COL_D021);
+    pixel_bg[lookup_index] = vicx_src(pixel_buffer[lookup_index]);
     pixel_buffer[lookup_index] = cregs[pixel_buffer[lookup_index]];
 
     /* draw pixel to buffer */
@@ -612,7 +619,7 @@ static DRAW_INLINE void draw_colors_8565(int offs, int i)
     int lookup_index;
 
     lookup_index = i;
-    vicii.xbgbuf[offs + i] = (pixel_buffer[lookup_index] == COL_D021);
+    vicii.xbgbuf[offs + i] = vicx_src(pixel_buffer[lookup_index]);
     /* resolve any unresolved colors */
 
     /* special case for grey dot handling */

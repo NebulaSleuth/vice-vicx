@@ -1,6 +1,6 @@
 /*
- * vicx.h - VIC-X graphics and memory extension (step 1: unlock, ID,
- *          capability registers, VRAM ports, palette, VIC-II colour remap).
+ * vicx.h - VIC-X graphics and memory extension (unlock, registers, VRAM
+ *          ports, palette, VIC-II colour remap, tile and bitmap layers).
  *
  * This file is part of VICE, the Versatile Commodore Emulator.
  * See README for copyright notice.
@@ -41,10 +41,11 @@ struct snapshot_s;
 #define VICX_PORT_MASK      0x3ffff /* 18-bit port addresses */
 
 /* Layer setup (32 bytes per layer in register space, spec "Layer setup").
-   Mode byte +0 (encoding chosen for the VICE model, not yet in the spec):
-   bits 0-1 mode, bit 2 16x16 tiles, bit 3 double-width pixels. */
+   Mode byte +0: bits 0-1 mode, bit 2 16x16 tiles, bit 3 double-width
+   pixels.  +1: bits 0-1 map width, bits 2-3 map height (32 << code tiles). */
 #define VICX_LAYER0_OFFSET      0x800   /* $20800 */
 #define VICX_LAYER1_OFFSET      0x820   /* $20820 */
+#define VICX_ORDER_OFFSET       0x840   /* $20840: layer order */
 #define VICX_LAYER_SETUP_SIZE   32
 #define VICX_LMODE_MASK         0x03
 #define VICX_LMODE_TILE4        0x00
@@ -53,6 +54,17 @@ struct snapshot_s;
 #define VICX_LMODE_BITMAP8      0x03
 #define VICX_LMODE_TILE16       0x04
 #define VICX_LMODE_DOUBLEWIDTH  0x08
+#define VICX_STRIDE_MASK        0x7ff
+#define VICX_SCROLL_MASK        0xfff
+/* tile map entries */
+#define VICX_TILE_NUMBER        0x03ff
+#define VICX_TILE_FLIPX         0x0400
+#define VICX_TILE_FLIPY         0x0800
+
+/* where a VIC-II line-buffer pixel came from (vicii.xbgbuf) */
+#define VICX_SRC_FG             0       /* graphics foreground, sprites */
+#define VICX_SRC_BG             1       /* drawn from $D021 */
+#define VICX_SRC_BORDER         2       /* drawn from $D020 */
 
 /* The display window the layers fill: the VIC-II's 320x200 text area. */
 #define VICX_WINDOW_FIRST_LINE  51
@@ -76,7 +88,7 @@ int vicx_cmdline_options_init(void);
 void vicx_reset(void);
 void vicx_start_of_frame(void);
 void vicx_start_of_line(void);
-void vicx_mix_line(uint8_t *dbuf, const uint8_t *bg, unsigned int line);
+void vicx_mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line);
 
 /* VIC-II I/O hooks.  `addr' is the offset from $D000 ($00-$FF).  The
    d000 functions replace vicii_store/read/peek for $D000-$D0FF, the

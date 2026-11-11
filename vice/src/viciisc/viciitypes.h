@@ -154,7 +154,7 @@ struct vicii_s {
 
     /* Draw buffer for a full line (one byte per pixel) */
     uint8_t dbuf[VICII_DRAW_BUFFER_SIZE];
-    /* VIC-X: 1 where the dbuf pixel was drawn in the $D021 background colour */
+    /* VIC-X: where each dbuf pixel came from (VICX_SRC_*: foreground, $D021, border) */
     uint8_t xbgbuf[VICII_DRAW_BUFFER_SIZE];
 
     /* parsed vicii register fields */
