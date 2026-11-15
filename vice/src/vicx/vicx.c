@@ -74,6 +74,9 @@
 /* ------------------------------------------------------------------------- */
 /* state */
 
+#define VICX_PAL_LOG_MAX    2048    /* palette writes logged per line */
+#define VICX_SLOT_HASH      1024    /* RGB -> slot table, power of 2 */
+
 typedef struct vicx_port_s {
     uint32_t addr;      /* 18-bit address */
     uint8_t step;       /* step code: bits 3-6 index, bit 7 backwards */
@@ -116,11 +119,33 @@ typedef struct vicx_s {
 
     /* emulator-side bookkeeping, not machine state */
     int stock_palette_pending;  /* entries 0-15 still to be filled from the C64 palette */
-    int palette_dirty;          /* palette RGB changed since the canvas was updated */
-    int remap_active;           /* canvas currently shows a VIC-X palette */
-    uint8_t canvas_mode;        /* CTRL bits the canvas palette was built for */
     uint8_t stock_rgb[16][3];   /* the stock canvas colours, for entries 0-15 */
     int stock_rgb_valid;
+
+    /* Colour path.  Once a program turns on remapping, a layer or the
+       sprite engine, every line is translated to RGB as it is drawn: VIC-II
+       pixels take the stock colour (or palette entry n with remapping),
+       layer and sprite pixels their palette entry, with the palette as it
+       stood at that pixel.  Each RGB gets a slot of a 256-entry canvas
+       palette, rebuilt at the end of every frame. */
+    int colour_active;          /* lines go through the slot palette */
+    int remap_active;           /* the canvas shows the slot palette */
+    uint8_t line_pal[256][3];   /* palette at the start of the line being drawn */
+    int line_stale_offset;      /* dbuf_offset when the line began, before the draw reset */
+    unsigned int log_count;     /* palette writes during the line */
+    int log_overflow_x;         /* first pixel of writes the log had no room for, or -1 */
+    struct {
+        uint16_t x;             /* first pixel the write shows on */
+        uint16_t addr;          /* register-space offset, below $400 */
+        uint8_t value;
+    } pal_log[VICX_PAL_LOG_MAX];
+    uint32_t slot_rgb[256];
+    uint8_t slot_live[256];     /* the slot holds a colour */
+    uint8_t slot_used[256];     /* a line of this frame uses it */
+    int slots_changed;          /* the canvas palette needs rebuilding */
+    int slots_full_logged;
+    uint32_t hash_key[VICX_SLOT_HASH];  /* RGB + 1, 0 = empty */
+    uint8_t hash_slot[VICX_SLOT_HASH];
 } vicx_t;
 
 static vicx_t vicx;
@@ -164,51 +189,134 @@ static void capture_stock_rgb(void)
     vicx.stock_rgb_valid = 1;
 }
 
-/* Show the canvas with a VIC-X palette for the CTRL bits in `mode'
-   (PALMAP and/or L0), or the configured palette when `mode' is 0. */
-static void palette_set_canvas(uint8_t mode)
+static const uint8_t *stock_colour(unsigned int i)
+{
+    return vicx.stock_rgb_valid ? vicx.stock_rgb[i] : fallback_palette[i];
+}
+
+static uint32_t rgb_key(const uint8_t *c)
+{
+    return ((uint32_t)c[0] << 16) | ((uint32_t)c[1] << 8) | c[2];
+}
+
+/* Show the slot palette on the canvas. */
+static void canvas_install(void)
 {
     struct video_canvas_s *canvas = vicii_get_canvas();
     palette_t *p;
-    unsigned int n;
     unsigned int i;
 
     if (canvas == NULL) {
         return;
     }
-    if (mode == 0) {
-        if (vicx.remap_active) {
-            video_color_set_palette_override(canvas, NULL);
-            vicx.remap_active = 0;
-        }
-        vicx.canvas_mode = 0;
-        return;
-    }
-
-    capture_stock_rgb();
-    /* 16 entries suffice for the remap alone; layers need all 256 */
-    n = (mode & (VICX_CTRL_L0 | VICX_CTRL_L1 | VICX_CTRL_SPR)) ? 256 : 16;
-    p = palette_create(n, NULL);
+    p = palette_create(256, NULL);
     if (p == NULL) {
         return;
     }
-    for (i = 0; i < n; i++) {
-        if (i < 16 && !(mode & VICX_CTRL_PALMAP)) {
-            const uint8_t *c = vicx.stock_rgb_valid ? vicx.stock_rgb[i] : fallback_palette[i];
-            p->entries[i].red = c[0];
-            p->entries[i].green = c[1];
-            p->entries[i].blue = c[2];
-        } else {
-            p->entries[i].red = vicx.regspace[i * 4 + 0];
-            p->entries[i].green = vicx.regspace[i * 4 + 1];
-            p->entries[i].blue = vicx.regspace[i * 4 + 2];
-        }
+    for (i = 0; i < 256; i++) {
+        p->entries[i].red = (uint8_t)(vicx.slot_rgb[i] >> 16);
+        p->entries[i].green = (uint8_t)(vicx.slot_rgb[i] >> 8);
+        p->entries[i].blue = (uint8_t)vicx.slot_rgb[i];
     }
     video_color_set_palette_override(canvas, p);
     palette_free(p);
     vicx.remap_active = 1;
-    vicx.canvas_mode = mode;
-    vicx.palette_dirty = 0;
+    vicx.slots_changed = 0;
+}
+
+/* Back to the configured palette and untranslated lines. */
+static void colour_off(void)
+{
+    struct video_canvas_s *canvas = vicii_get_canvas();
+
+    if (vicx.remap_active && canvas != NULL) {
+        video_color_set_palette_override(canvas, NULL);
+    }
+    vicx.remap_active = 0;
+    vicx.colour_active = 0;
+}
+
+static void hash_rebuild(void)
+{
+    unsigned int s, h;
+
+    memset(vicx.hash_key, 0, sizeof(vicx.hash_key));
+    for (s = 0; s < 256; s++) {
+        if (vicx.slot_live[s]) {
+            h = (vicx.slot_rgb[s] * 2654435761u) >> 22;
+            while (vicx.hash_key[h] != 0) {
+                h = (h + 1) & (VICX_SLOT_HASH - 1);
+            }
+            vicx.hash_key[h] = vicx.slot_rgb[s] + 1;
+            vicx.hash_slot[h] = (uint8_t)s;
+        }
+    }
+}
+
+/* The slot showing `rgb' in this frame; a new one if there is room, else
+   the nearest colour already in use. */
+static uint8_t slot_for(uint32_t rgb)
+{
+    unsigned int h = (rgb * 2654435761u) >> 22;
+    unsigned int s, best = 0;
+    long best_d = -1;
+
+    while (vicx.hash_key[h] != 0) {
+        if (vicx.hash_key[h] == rgb + 1) {
+            s = vicx.hash_slot[h];
+            vicx.slot_used[s] = 1;
+            return (uint8_t)s;
+        }
+        h = (h + 1) & (VICX_SLOT_HASH - 1);
+    }
+    for (s = 0; s < 256; s++) {
+        if (!vicx.slot_live[s]) {
+            vicx.slot_live[s] = 1;
+            vicx.slot_used[s] = 1;
+            vicx.slot_rgb[s] = rgb;
+            vicx.hash_key[h] = rgb + 1;
+            vicx.hash_slot[h] = (uint8_t)s;
+            vicx.slots_changed = 1;
+            return (uint8_t)s;
+        }
+    }
+    /* more than 256 colours in one frame */
+    if (!vicx.slots_full_logged) {
+        log_warning(vicx_log, "more than 256 colours in one frame; showing the nearest");
+        vicx.slots_full_logged = 1;
+    }
+    for (s = 0; s < 256; s++) {
+        long dr = (long)((rgb >> 16) & 0xff) - (long)((vicx.slot_rgb[s] >> 16) & 0xff);
+        long dg = (long)((rgb >> 8) & 0xff) - (long)((vicx.slot_rgb[s] >> 8) & 0xff);
+        long db = (long)(rgb & 0xff) - (long)(vicx.slot_rgb[s] & 0xff);
+        long d = dr * dr + dg * dg + db * db;
+        if (best_d < 0 || d < best_d) {
+            best_d = d;
+            best = s;
+        }
+    }
+    vicx.slot_used[best] = 1;
+    return (uint8_t)best;
+}
+
+/* Start translating lines: slots 0-15 hold the stock colours, so lines
+   drawn earlier in this frame still show right. */
+static void colour_on(void)
+{
+    unsigned int i;
+
+    capture_stock_rgb();
+    memset(vicx.slot_live, 0, sizeof(vicx.slot_live));
+    memset(vicx.slot_used, 0, sizeof(vicx.slot_used));
+    memset(vicx.slot_rgb, 0, sizeof(vicx.slot_rgb));
+    for (i = 0; i < 16; i++) {
+        vicx.slot_rgb[i] = rgb_key(stock_colour(i));
+        vicx.slot_live[i] = 1;
+        vicx.slot_used[i] = 1;
+    }
+    hash_rebuild();
+    vicx.slots_changed = 1;
+    vicx.colour_active = 1;
 }
 
 /* Fill palette entries 0-15 from the C64 palette the emulator currently
@@ -221,7 +329,14 @@ static void palette_load_stock(void)
     vicx.stock_palette_pending = 0;
     capture_stock_rgb();
 
-    if (canvas != NULL && canvas->palette != NULL
+    if (vicx.stock_rgb_valid) {
+        for (i = 0; i < 16; i++) {
+            vicx.regspace[i * 4 + 0] = vicx.stock_rgb[i][0];
+            vicx.regspace[i * 4 + 1] = vicx.stock_rgb[i][1];
+            vicx.regspace[i * 4 + 2] = vicx.stock_rgb[i][2];
+            vicx.regspace[i * 4 + 3] = 0;
+        }
+    } else if (canvas != NULL && canvas->palette != NULL
         && canvas->palette->num_entries >= 16 && !vicx.remap_active) {
         for (i = 0; i < 16; i++) {
             vicx.regspace[i * 4 + 0] = canvas->palette->entries[i].red;
@@ -268,8 +383,18 @@ static void port_mem_write(uint32_t addr, uint8_t value)
         if (addr < 0x40 && vicx.stock_palette_pending) {
             palette_load_stock();
         }
-        if (addr < 0x400 && (addr & 3) != 3 && vicx.regspace[addr] != value) {
-            vicx.palette_dirty = 1;
+        if (vicx.colour_active && addr < 0x400 && (addr & 3) != 3) {
+            /* the write shows from the next pixel the VIC-II draws; at the
+               start of a line the draw position has not wrapped yet */
+            int x = (vicii.dbuf_offset == vicx.line_stale_offset) ? 0 : vicii.dbuf_offset;
+            if (vicx.log_count < VICX_PAL_LOG_MAX) {
+                vicx.pal_log[vicx.log_count].x = (uint16_t)x;
+                vicx.pal_log[vicx.log_count].addr = (uint16_t)addr;
+                vicx.pal_log[vicx.log_count].value = value;
+                vicx.log_count++;
+            } else if (vicx.log_overflow_x < 0) {
+                vicx.log_overflow_x = x;
+            }
         }
         vicx.regspace[addr] = value;
     }
@@ -750,9 +875,7 @@ int vicx_dump(void)
 
 void vicx_reset(void)
 {
-    if (vicx_enabled) {
-        palette_set_canvas(0);
-    }
+    colour_off();
     vicx.unlocked = 0;
     vicx.seq = 0;
     vicx.ctrl = 0;
@@ -781,7 +904,8 @@ void vicx_reset(void)
     irq_update();
     windows_changed();
     vicx.stock_palette_pending = 1;
-    vicx.palette_dirty = 0;
+    vicx.log_count = 0;
+    vicx.log_overflow_x = -1;
 }
 
 /* Wide window edges are clamped at the edge of what the emulator shows
@@ -797,8 +921,6 @@ static unsigned int clamp_edge(uint8_t v, int limit)
 
 void vicx_start_of_frame(void)
 {
-    uint8_t mode;
-
     if (!vicx_enabled) {
         return;
     }
@@ -817,18 +939,31 @@ void vicx_start_of_frame(void)
     }
     vicx.irq_stat |= VICX_IRQ_FRAME;
     irq_update();
+}
 
-    mode = vicx.ctrl & (VICX_CTRL_PALMAP | VICX_CTRL_L0 | VICX_CTRL_L1 | VICX_CTRL_SPR);
-    if (mode) {
-        if (vicx.stock_palette_pending) {
-            palette_load_stock();
-        }
-        if (!vicx.remap_active || vicx.palette_dirty || mode != vicx.canvas_mode) {
-            palette_set_canvas(mode);
-        }
-    } else if (vicx.remap_active) {
-        palette_set_canvas(0);
+/* The frame is finished and about to be shown: free the slots no line used,
+   and give the canvas the palette this frame needs. */
+void vicx_end_of_frame(void)
+{
+    unsigned int s;
+    int freed = 0;
+
+    if (!vicx_enabled || !vicx.colour_active) {
+        return;
     }
+    if (vicx.slots_changed || !vicx.remap_active) {
+        canvas_install();
+    }
+    for (s = 0; s < 256; s++) {
+        if (vicx.slot_live[s] && !vicx.slot_used[s]) {
+            vicx.slot_live[s] = 0;
+            freed = 1;
+        }
+    }
+    if (freed) {
+        hash_rebuild();
+    }
+    memset(vicx.slot_used, 0, sizeof(vicx.slot_used));
 }
 
 void vicx_start_of_line(void)
@@ -837,6 +972,23 @@ void vicx_start_of_line(void)
         return;
     }
     vicx.line_ctrl = vicx.ctrl;
+    if (!vicx.colour_active
+        && (vicx.ctrl & (VICX_CTRL_PALMAP | VICX_CTRL_L0 | VICX_CTRL_L1 | VICX_CTRL_SPR))) {
+        colour_on();
+    }
+    if (vicx.colour_active) {
+        unsigned int i;
+        for (i = 0; i < 256; i++) {
+            const uint8_t *c = (i < 16 && vicx.stock_palette_pending)
+                               ? stock_colour(i) : &vicx.regspace[i * 4];
+            vicx.line_pal[i][0] = c[0];
+            vicx.line_pal[i][1] = c[1];
+            vicx.line_pal[i][2] = c[2];
+        }
+        vicx.line_stale_offset = vicii.dbuf_offset;
+        vicx.log_count = 0;
+        vicx.log_overflow_x = -1;
+    }
     memcpy(vicx.line_layer[0], &vicx.regspace[VICX_LAYER0_OFFSET], VICX_LAYER_SETUP_SIZE);
     memcpy(vicx.line_layer[1], &vicx.regspace[VICX_LAYER1_OFFSET], VICX_LAYER_SETUP_SIZE);
     vicx.line_order = vicx.regspace[VICX_ORDER_OFFSET];
@@ -1071,6 +1223,57 @@ static void sprite_line(unsigned int y, uint8_t *front, uint8_t *behind, unsigne
    VIC-II's $D021 pixel stays. */
 enum { SRC_L0, SRC_L1, SRC_VIC, SRC_SPR, SRC_SPR_BEHIND };
 
+/* Palette entry for each pixel of the line, or -1 for a VIC-II pixel. */
+static int16_t lpx[VICII_DRAW_BUFFER_SIZE];
+
+/* Turn the finished line into slots of the canvas palette. */
+static void translate_line(uint8_t *dbuf)
+{
+    static uint8_t work[256][3];
+    static int16_t cache[16 + 256];     /* VIC-II colour 0-15, then palette 0-255 */
+    int palmap = (vicx.line_ctrl & VICX_CTRL_PALMAP) != 0;
+    unsigned int li = 0, x, k;
+    int overflow_done = 0;
+
+    memcpy(work, vicx.line_pal, sizeof(work));
+    for (k = 0; k < 16 + 256; k++) {
+        cache[k] = -1;
+    }
+    for (x = 0; x < VICII_DRAW_BUFFER_SIZE; x++) {
+        int16_t e = lpx[x];
+        while (li < vicx.log_count && vicx.pal_log[li].x <= x) {
+            unsigned int a = vicx.pal_log[li].addr;
+            work[a >> 2][a & 3] = vicx.pal_log[li].value;
+            cache[16 + (a >> 2)] = -1;
+            li++;
+        }
+        if (vicx.log_overflow_x >= 0 && !overflow_done && (int)x >= vicx.log_overflow_x) {
+            for (k = 0; k < 256; k++) {
+                const uint8_t *c = (k < 16 && vicx.stock_palette_pending)
+                                   ? stock_colour(k) : &vicx.regspace[k * 4];
+                work[k][0] = c[0];
+                work[k][1] = c[1];
+                work[k][2] = c[2];
+                cache[16 + k] = -1;
+            }
+            overflow_done = 1;
+        }
+        if (e < 0) {
+            k = dbuf[x] & 0x0f;
+            if (palmap) {
+                k += 16;
+            }
+        } else {
+            k = 16 + (unsigned int)e;
+        }
+        if (cache[k] < 0) {
+            const uint8_t *c = (k < 16) ? stock_colour(k) : work[k - 16];
+            cache[k] = slot_for(rgb_key(c));
+        }
+        dbuf[x] = (uint8_t)cache[k];
+    }
+}
+
 static void mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
 {
     static uint8_t buf[5][VICX_WINDOW_MAX_WIDTH];   /* indexed by SRC_*; VIC unused */
@@ -1139,7 +1342,6 @@ static void mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
         sprite_line(y, buf[SRC_SPR], buf[SRC_SPR_BEHIND], width);
     }
 
-    dbuf += VICX_DBUF_WINDOW_X - left;
     src += VICX_DBUF_WINDOW_X - left;
     for (x = 0; x < width; x++) {
         int vic_bg = (src[x] == VICX_SRC_BG);
@@ -1156,7 +1358,7 @@ static void mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
                     break;          /* opaque VIC-II pixel: keep it */
                 }
             } else if (on[s] && buf[s][x] != 0) {
-                dbuf[x] = buf[s][x];
+                lpx[VICX_DBUF_WINDOW_X - left + x] = buf[s][x];
                 break;
             }
         }
@@ -1182,10 +1384,20 @@ static void sprite_frame_done(void)
 
 void vicx_mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line)
 {
+    unsigned int x;
+
     if (!vicx_enabled) {
         return;
     }
+    if (vicx.colour_active) {
+        for (x = 0; x < VICII_DRAW_BUFFER_SIZE; x++) {
+            lpx[x] = -1;
+        }
+    }
     mix_line(dbuf, src, line);
+    if (vicx.colour_active) {
+        translate_line(dbuf);
+    }
     if (line == VICX_WINDOW_FIRST_LINE + VICX_WINDOW_HEIGHT - 1 + vicx.frame_bottom) {
         sprite_frame_done();
     }
@@ -1220,7 +1432,7 @@ static int set_vicx_enabled(int value, void *param)
         return 0;
     }
     if (!val) {
-        palette_set_canvas(0);
+        colour_off();
     }
     vicx_enabled = val;
     vicx_reset();
@@ -1339,7 +1551,7 @@ int vicx_snapshot_read_module(snapshot_t *s)
     if (!vicx_enabled) {
         resources_set_int("VICXEnable", 1);
     }
-    palette_set_canvas(0);
+    colour_off();
 
     if (SMR_B(m, &b) < 0) {
         goto fail;
@@ -1388,8 +1600,7 @@ int vicx_snapshot_read_module(snapshot_t *s)
         }
     }
     windows_changed();
-    vicx.stock_palette_pending = 0;
-    vicx.palette_dirty = 1;     /* re-apply the remap on the next frame */
+    vicx.stock_palette_pending = 0;    /* the next line turns the colour path on if CTRL needs it */
     memcpy(vicx.spr_table, &vicx.regspace[VICX_SPRITES_OFFSET], sizeof(vicx.spr_table));
     if (vicx.int_valid && (vicx.irq_stat & vicx.irq_en)) {
         interrupt_restore_irq(maincpu_int_status, vicx.int_num, 1);

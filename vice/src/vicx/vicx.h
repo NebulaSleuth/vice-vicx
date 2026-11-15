@@ -132,6 +132,7 @@ uint8_t vicx_window_read(uint16_t addr);
 void vicx_window_store(uint16_t addr, uint8_t value);
 void vicx_reset(void);
 void vicx_start_of_frame(void);
+void vicx_end_of_frame(void);
 void vicx_start_of_line(void);
 void vicx_mix_line(uint8_t *dbuf, const uint8_t *src, unsigned int line);
 
