@@ -53,6 +53,8 @@ struct snapshot_s;
 #define VICX_COLLIST_OFFSET     0x900   /* $20900: collision list */
 #define VICX_DMADESC_OFFSET     0x880   /* $20880: four DMA descriptors */
 #define VICX_DMADESC_SIZE       32
+#define VICX_DMALIST_OFFSET     0x85C   /* $2085C-$2085E: a DMA list's address in VRAM */
+#define VICX_DMALIST_MAX        4096    /* a list ends after this many descriptors */
 
 /* DMA descriptor */
 #define VICX_DMA_OP_COPY        0
@@ -77,7 +79,7 @@ struct snapshot_s;
 #define VICX_CAP_BLIT_SCALED    0x04
 #define VICX_CAP_BLIT_DIRECTION 0x08
 #define VICX_CAP_BLIT_LIST      0x10
-#define VICX_CAP_BLIT           (VICX_CAP_BLIT_EXPAND | VICX_CAP_BLIT_REMAP | VICX_CAP_BLIT_SCALED | VICX_CAP_BLIT_DIRECTION)
+#define VICX_CAP_BLIT           (VICX_CAP_BLIT_EXPAND | VICX_CAP_BLIT_REMAP | VICX_CAP_BLIT_SCALED | VICX_CAP_BLIT_DIRECTION | VICX_CAP_BLIT_LIST)
 #define VICX_DMA_BYTES_PER_CYCLE 8      /* background speed, about 8 MB/s */
 
 /* CPU windows */

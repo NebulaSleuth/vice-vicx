@@ -697,15 +697,42 @@ static void dma_alarm_handler(CLOCK offset, void *data)
    runs at most once per start; a link back to one already run ends the
    chain.  The VICE model moves the data at once; background transfers keep
    DMA_CMD busy for the time they would take. */
-static void dma_start(int n)
+static void dma_start(uint8_t cmd)
 {
     unsigned long background = 0;
     int ran = 0;
+    int n = cmd & 3;
 
     if (vicx.dma_busy) {
         return;                                 /* ignored while busy */
     }
     vicx.dma_irq_pending = 0;
+    if (cmd & VICX_DMA_CMD_LIST) {
+        /* a list in VRAM: 32-byte descriptors one after another from the
+           address at $2085C-$2085E, each read when its turn comes, until
+           one whose operation is $FF (or 4096 of them) */
+        uint32_t la = vicx.regspace[VICX_DMALIST_OFFSET]
+                      | (vicx.regspace[VICX_DMALIST_OFFSET + 1] << 8)
+                      | ((uint32_t)vicx.regspace[VICX_DMALIST_OFFSET + 2] << 16);
+        uint8_t d[VICX_DMADESC_SIZE];
+        int k, j;
+
+        for (k = 0; k < VICX_DMALIST_MAX; k++) {
+            for (j = 0; j < VICX_DMADESC_SIZE; j++) {
+                d[j] = vicx.vram[(la + j) & (VICX_VRAM_SIZE - 1)];
+            }
+            background += VICX_DMADESC_SIZE;
+            if (d[0] == 0xff) {
+                break;
+            }
+            if (d[1] & VICX_DMA_IRQ) {
+                vicx.dma_irq_pending = 1;
+            }
+            background += dma_run(d);
+            la += VICX_DMADESC_SIZE;
+        }
+        n = -1;
+    }
     while (n >= 0 && n < 4 && !(ran & (1 << n))) {
         const uint8_t *d = &vicx.regspace[VICX_DMADESC_OFFSET + n * VICX_DMADESC_SIZE];
         uint8_t next = d[20];
@@ -813,7 +840,7 @@ static void reg_write(uint16_t reg, uint8_t value)
         case 0x5a:
             /* bit 2: a list in VRAM, which this model does not run yet */
             if (!(value & VICX_DMA_CMD_LIST) || (VICX_CAP_BLIT & VICX_CAP_BLIT_LIST)) {
-                dma_start(value & 3);
+                dma_start(value);
             }
             break;
         default:
