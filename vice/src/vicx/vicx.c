@@ -614,12 +614,23 @@ static unsigned long dma_run(const uint8_t *d)
 
     int expand = (op == VICX_DMA_OP_EXPAND || op == VICX_DMA_OP_EXPAND_MASKED);
     uint8_t bits = 0;
+    uint8_t table[256];
 
     /* reserved, and optional operations this model lacks: do nothing */
-    if (op > VICX_DMA_OP_EXPAND_MASKED || dspace == 3 || (op != VICX_DMA_OP_FILL && sspace == 3)
+    if (op > VICX_DMA_OP_REMAP || dspace == 3 || (op != VICX_DMA_OP_FILL && sspace == 3)
         || (expand && !(VICX_CAP_BLIT & VICX_CAP_BLIT_EXPAND))
+        || (op == VICX_DMA_OP_REMAP && !(VICX_CAP_BLIT & VICX_CAP_BLIT_REMAP))
         || ((d[1] & (VICX_DMA_MIRROR | VICX_DMA_BACKWARD)) && !(VICX_CAP_BLIT & VICX_CAP_BLIT_DIRECTION))) {
         return 0;
+    }
+    if (op == VICX_DMA_OP_REMAP) {
+        /* the table, 256 bytes in VRAM at +21-+23, read as the descriptor
+           starts (so the transfer may overwrite it) */
+        uint32_t tbl = d[21] | (d[22] << 8) | ((uint32_t)d[23] << 16);
+        for (i = 0; i < 256; i++) {
+            table[i] = vicx.vram[(tbl + i) & (VICX_VRAM_SIZE - 1)];
+        }
+        bytes += 256;
     }
     for (row = 0; row < height; row++) {
         uint32_t s = twod ? src + row * sstride : src;
@@ -642,7 +653,7 @@ static unsigned long dma_run(const uint8_t *d)
             } else {
                 uint8_t v = dma_read(sspace, s + i);
                 if (op == VICX_DMA_OP_COPY || v != trans) {
-                    dma_write(dspace, t + i, v);
+                    dma_write(dspace, t + i, op == VICX_DMA_OP_REMAP ? table[v] : v);
                 }
             }
             if (c64 && steal_hook) {
