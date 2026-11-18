@@ -82,8 +82,8 @@ colours unless the remap is on.
   for one cycle per 8 bytes; a transfer touching C64 RAM halts the CPU one
   cycle per byte (and while the VIC-II holds the bus), like the REU.
 - Of the optional blitter operations, CAP_BLIT ($D05B) reports what this
-  model has so far: expand and masked expand, remap, and the direction
-  bits ($0B).
+  model has: expand and masked expand, remap, scaled copy and the
+  direction bits ($0F).
   DMA_CMD with bit 2 does nothing until lists are in. Strides are signed.
   An expand counts its destination bytes for the busy time.
   A remap reads its table as it starts and counts 256 bytes more.

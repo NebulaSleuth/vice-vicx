@@ -608,6 +608,8 @@ static unsigned long dma_run(const uint8_t *d)
     unsigned int height = twod ? le16(&d[12]) : 1;
     int32_t sstride = (int16_t)le16(&d[14]), dstride = (int16_t)le16(&d[16]);   /* signed */
     int mirror = (d[1] & VICX_DMA_MIRROR) != 0, backward = (d[1] & VICX_DMA_BACKWARD) != 0;
+    int scaled = (op == VICX_DMA_OP_SCALED);
+    uint32_t xstep = le16(&d[24]), ystep = le16(&d[26]);     /* 8.8 */
     uint8_t fill = d[18], trans = d[19];
     int c64 = (dspace == VICX_DMA_SPACE_C64) || (op != VICX_DMA_OP_FILL && sspace == VICX_DMA_SPACE_C64);
     unsigned long bytes = 0;
@@ -618,9 +620,10 @@ static unsigned long dma_run(const uint8_t *d)
     uint8_t table[256];
 
     /* reserved, and optional operations this model lacks: do nothing */
-    if (op > VICX_DMA_OP_REMAP || dspace == 3 || (op != VICX_DMA_OP_FILL && sspace == 3)
+    if (op > VICX_DMA_OP_SCALED || dspace == 3 || (op != VICX_DMA_OP_FILL && sspace == 3)
         || (expand && !(VICX_CAP_BLIT & VICX_CAP_BLIT_EXPAND))
         || (op == VICX_DMA_OP_REMAP && !(VICX_CAP_BLIT & VICX_CAP_BLIT_REMAP))
+        || (scaled && !(VICX_CAP_BLIT & VICX_CAP_BLIT_SCALED))
         || ((d[1] & (VICX_DMA_MIRROR | VICX_DMA_BACKWARD)) && !(VICX_CAP_BLIT & VICX_CAP_BLIT_DIRECTION))) {
         return 0;
     }
@@ -639,7 +642,9 @@ static unsigned long dma_run(const uint8_t *d)
        write, as the hardware does */
     for (rr = 0; rr < height; rr++) {
         row = backward ? height - 1 - rr : rr;
-        uint32_t s = twod ? src + (uint32_t)((int32_t)row * sstride) : src;
+        /* scaled: destination row r shows source row (r * Y step) >> 8 */
+        unsigned int srow = scaled ? (unsigned int)((row * ystep) >> 8) : row;
+        uint32_t s = twod ? src + (uint32_t)((int32_t)srow * sstride) : src;
         uint32_t t = twod ? dst + (uint32_t)((int32_t)row * dstride) : dst;
         for (ii = 0; ii < width; ii++) {
             i = backward ? width - 1 - ii : ii;
@@ -657,7 +662,8 @@ static unsigned long dma_run(const uint8_t *d)
                     dma_write(dspace, t + di, trans);
                 }
             } else {
-                uint8_t v = dma_read(sspace, s + i);
+                /* scaled: byte i shows source byte (i * X step) >> 8 */
+                uint8_t v = dma_read(sspace, s + (scaled ? (uint32_t)((i * xstep) >> 8) : i));
                 if (op == VICX_DMA_OP_COPY || v != trans) {
                     dma_write(dspace, t + di, op == VICX_DMA_OP_REMAP ? table[v] : v);
                 }

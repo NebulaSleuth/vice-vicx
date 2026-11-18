@@ -61,6 +61,7 @@ struct snapshot_s;
 #define VICX_DMA_OP_EXPAND      3       /* optional (CAP_BLIT bit 0) */
 #define VICX_DMA_OP_EXPAND_MASKED 4
 #define VICX_DMA_OP_REMAP       5       /* optional (CAP_BLIT bit 1) */
+#define VICX_DMA_OP_SCALED      6       /* optional (CAP_BLIT bit 2) */
 #define VICX_DMA_SPACE_C64      0       /* +1 bits 0-1 source, 2-3 destination */
 #define VICX_DMA_SPACE_VRAM     1       /* the port address space */
 #define VICX_DMA_SPACE_XRAM     2
@@ -76,7 +77,7 @@ struct snapshot_s;
 #define VICX_CAP_BLIT_SCALED    0x04
 #define VICX_CAP_BLIT_DIRECTION 0x08
 #define VICX_CAP_BLIT_LIST      0x10
-#define VICX_CAP_BLIT           (VICX_CAP_BLIT_EXPAND | VICX_CAP_BLIT_REMAP | VICX_CAP_BLIT_DIRECTION)
+#define VICX_CAP_BLIT           (VICX_CAP_BLIT_EXPAND | VICX_CAP_BLIT_REMAP | VICX_CAP_BLIT_SCALED | VICX_CAP_BLIT_DIRECTION)
 #define VICX_DMA_BYTES_PER_CYCLE 8      /* background speed, about 8 MB/s */
 
 /* CPU windows */
