@@ -81,6 +81,10 @@ colours unless the remap is on.
 - DMA moves its data at once. A background transfer then keeps DMA_CMD busy
   for one cycle per 8 bytes; a transfer touching C64 RAM halts the CPU one
   cycle per byte (and while the VIC-II holds the bus), like the REU.
+- Of the optional blitter operations, CAP_BLIT ($D05B) reports what this
+  model has so far: expand and masked expand ($01). A descriptor with a
+  direction bit, or DMA_CMD with bit 2, does nothing until those are in.
+  An expand counts its destination bytes for the busy time.
 - With monitor watchpoints on, the windows still work, but accesses through
   them are not watched.
 - Only x64sc gets the windows and the DMA cycle stealing; x64 and xscpu64

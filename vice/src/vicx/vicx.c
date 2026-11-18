@@ -612,8 +612,14 @@ static unsigned long dma_run(const uint8_t *d)
     unsigned long bytes = 0;
     unsigned int row, i;
 
-    if (op > VICX_DMA_OP_MASKED || dspace == 3 || (op != VICX_DMA_OP_FILL && sspace == 3)) {
-        return 0;                               /* reserved: does nothing */
+    int expand = (op == VICX_DMA_OP_EXPAND || op == VICX_DMA_OP_EXPAND_MASKED);
+    uint8_t bits = 0;
+
+    /* reserved, and optional operations this model lacks: do nothing */
+    if (op > VICX_DMA_OP_EXPAND_MASKED || dspace == 3 || (op != VICX_DMA_OP_FILL && sspace == 3)
+        || (expand && !(VICX_CAP_BLIT & VICX_CAP_BLIT_EXPAND))
+        || ((d[1] & (VICX_DMA_MIRROR | VICX_DMA_BACKWARD)) && !(VICX_CAP_BLIT & VICX_CAP_BLIT_DIRECTION))) {
+        return 0;
     }
     for (row = 0; row < height; row++) {
         uint32_t s = twod ? src + row * sstride : src;
@@ -621,6 +627,18 @@ static unsigned long dma_run(const uint8_t *d)
         for (i = 0; i < width; i++) {
             if (op == VICX_DMA_OP_FILL) {
                 dma_write(dspace, t + i, fill);
+            } else if (expand) {
+                /* 1 bit per pixel, most significant first; each row starts
+                   on a byte.  1 = fill value; 0 = transparent value, or
+                   nothing for masked expand */
+                if ((i & 7) == 0) {
+                    bits = dma_read(sspace, s + (i >> 3));
+                }
+                if (bits & (0x80 >> (i & 7))) {
+                    dma_write(dspace, t + i, fill);
+                } else if (op == VICX_DMA_OP_EXPAND) {
+                    dma_write(dspace, t + i, trans);
+                }
             } else {
                 uint8_t v = dma_read(sspace, s + i);
                 if (op == VICX_DMA_OP_COPY || v != trans) {
@@ -724,6 +742,8 @@ static uint8_t reg_read(uint16_t reg, int side_effects)
             return vicx.win[reg - 0x54];
         case 0x5a:
             return vicx.dma_busy ? 0x80 : 0x00; /* DMA_CMD: bit 7 busy */
+        case 0x5b:
+            return VICX_CAP_BLIT;               /* CAP_BLIT */
         default:
             return 0xff;                        /* reserved, and $D06F */
     }
@@ -768,7 +788,10 @@ static void reg_write(uint16_t reg, uint8_t value)
             windows_changed();
             break;
         case 0x5a:
-            dma_start(value & 3);
+            /* bit 2: a list in VRAM, which this model does not run yet */
+            if (!(value & VICX_DMA_CMD_LIST) || (VICX_CAP_BLIT & VICX_CAP_BLIT_LIST)) {
+                dma_start(value & 3);
+            }
             break;
         default:
             break;                              /* read-only and reserved */
