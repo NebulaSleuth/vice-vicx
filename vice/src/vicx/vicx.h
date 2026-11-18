@@ -76,7 +76,7 @@ struct snapshot_s;
 #define VICX_CAP_BLIT_SCALED    0x04
 #define VICX_CAP_BLIT_DIRECTION 0x08
 #define VICX_CAP_BLIT_LIST      0x10
-#define VICX_CAP_BLIT           (VICX_CAP_BLIT_EXPAND | VICX_CAP_BLIT_REMAP)
+#define VICX_CAP_BLIT           (VICX_CAP_BLIT_EXPAND | VICX_CAP_BLIT_REMAP | VICX_CAP_BLIT_DIRECTION)
 #define VICX_DMA_BYTES_PER_CYCLE 8      /* background speed, about 8 MB/s */
 
 /* CPU windows */

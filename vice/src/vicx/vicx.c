@@ -606,11 +606,12 @@ static unsigned long dma_run(const uint8_t *d)
     uint32_t src = le32(&d[2]), dst = le32(&d[6]);
     unsigned int width = le16(&d[10]);
     unsigned int height = twod ? le16(&d[12]) : 1;
-    unsigned int sstride = le16(&d[14]), dstride = le16(&d[16]);
+    int32_t sstride = (int16_t)le16(&d[14]), dstride = (int16_t)le16(&d[16]);   /* signed */
+    int mirror = (d[1] & VICX_DMA_MIRROR) != 0, backward = (d[1] & VICX_DMA_BACKWARD) != 0;
     uint8_t fill = d[18], trans = d[19];
     int c64 = (dspace == VICX_DMA_SPACE_C64) || (op != VICX_DMA_OP_FILL && sspace == VICX_DMA_SPACE_C64);
     unsigned long bytes = 0;
-    unsigned int row, i;
+    unsigned int rr, ii, row, i, di;
 
     int expand = (op == VICX_DMA_OP_EXPAND || op == VICX_DMA_OP_EXPAND_MASKED);
     uint8_t bits = 0;
@@ -632,28 +633,33 @@ static unsigned long dma_run(const uint8_t *d)
         }
         bytes += 256;
     }
-    for (row = 0; row < height; row++) {
-        uint32_t s = twod ? src + row * sstride : src;
-        uint32_t t = twod ? dst + row * dstride : dst;
-        for (i = 0; i < width; i++) {
+    /* backwards: the last row first, each row from its last byte; mirror:
+       byte i of a row goes to width - 1 - i.  The order matters only when
+       source and destination overlap: each byte is read just before its
+       write, as the hardware does */
+    for (rr = 0; rr < height; rr++) {
+        row = backward ? height - 1 - rr : rr;
+        uint32_t s = twod ? src + (uint32_t)((int32_t)row * sstride) : src;
+        uint32_t t = twod ? dst + (uint32_t)((int32_t)row * dstride) : dst;
+        for (ii = 0; ii < width; ii++) {
+            i = backward ? width - 1 - ii : ii;
+            di = mirror ? width - 1 - i : i;
             if (op == VICX_DMA_OP_FILL) {
-                dma_write(dspace, t + i, fill);
+                dma_write(dspace, t + di, fill);
             } else if (expand) {
                 /* 1 bit per pixel, most significant first; each row starts
                    on a byte.  1 = fill value; 0 = transparent value, or
                    nothing for masked expand */
-                if ((i & 7) == 0) {
-                    bits = dma_read(sspace, s + (i >> 3));
-                }
+                bits = dma_read(sspace, s + (i >> 3));
                 if (bits & (0x80 >> (i & 7))) {
-                    dma_write(dspace, t + i, fill);
+                    dma_write(dspace, t + di, fill);
                 } else if (op == VICX_DMA_OP_EXPAND) {
-                    dma_write(dspace, t + i, trans);
+                    dma_write(dspace, t + di, trans);
                 }
             } else {
                 uint8_t v = dma_read(sspace, s + i);
                 if (op == VICX_DMA_OP_COPY || v != trans) {
-                    dma_write(dspace, t + i, op == VICX_DMA_OP_REMAP ? table[v] : v);
+                    dma_write(dspace, t + di, op == VICX_DMA_OP_REMAP ? table[v] : v);
                 }
             }
             if (c64 && steal_hook) {
