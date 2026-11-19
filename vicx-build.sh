@@ -4,7 +4,8 @@
 # Usage (from Windows, cmd.exe):
 #   set MSYSTEM=UCRT64
 #   set CHERE_INVOKING=1
-#   C:\msys64\usr\bin\bash.exe -lc "/d/Repos/vice-vicx/vicx-build.sh [gtk|headless] [configure]"
+#   C:\msys64\usr\bin\bash.exe -lc "/path/to/vice-vicx/vicx-build.sh [gtk|headless] [configure]"
+# or, from an MSYS2 UCRT64 shell:  ./vicx-build.sh [gtk|headless] [configure]
 #
 #   gtk        GTK3 x64sc in vice/build-ucrt64       (default)
 #   headless   headless x64sc in vice/build-headless (used by the VIC-X tests)

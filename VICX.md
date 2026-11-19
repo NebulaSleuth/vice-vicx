@@ -3,16 +3,27 @@
 Branch `vicx`, started from the VICE `3.10.0` tag of
 https://github.com/VICE-Team/svn-mirror. It is the reference model for the
 VIC-X graphics and memory extension; the spec, the ca65 include and the
-conformance tests live in the VIC-X repository (`D:\Repos\VIC-X`).
+conformance tests live in the VIC-X repository, whose tests expect this
+fork checked out next to it as `vice-vicx` (or `VICX_X64SC` set to the
+headless `x64sc.exe`).
+
+All VIC-X work is on the `vicx` branch; `main` follows upstream unchanged.
 
 ## Building
 
-MSYS2 UCRT64, from cmd.exe:
+MSYS2 UCRT64 with VICE's usual build dependencies. From an MSYS2 UCRT64
+shell in the checkout:
+
+    ./vicx-build.sh headless
+    ./vicx-build.sh gtk
+
+or from cmd.exe, with the checkout's path in MSYS2 form (`D:\src\vice-vicx`
+is `/d/src/vice-vicx`):
 
     set MSYSTEM=UCRT64
     set CHERE_INVOKING=1
-    C:\msys64\usr\bin\bash.exe -lc "/d/Repos/vice-vicx/vicx-build.sh headless"
-    C:\msys64\usr\bin\bash.exe -lc "/d/Repos/vice-vicx/vicx-build.sh gtk"
+    C:\msys64\usr\bin\bash.exe -lc "/path/to/vice-vicx/vicx-build.sh headless"
+    C:\msys64\usr\bin\bash.exe -lc "/path/to/vice-vicx/vicx-build.sh gtk"
 
 Outputs: `vice/build-headless/src/x64sc.exe` (used by the tests) and
 `vice/build-ucrt64/src/x64sc.exe` (GTK3). Pass `configure` as the second
