@@ -439,6 +439,16 @@ void vicii_raster_draw_handler(void)
     /* VIC-X: mix the layers into the finished line before it is drawn */
     vicx_mix_line(vicii.dbuf, vicii.xbgbuf, vicii.raster_line);
 
+    /* VIC-X: after the frame's last line is mixed, give the canvas the
+       palette of this frame before raster_line_emulate() renders it at
+       the end of the frame (the same two cases as the vsyncs below, one
+       line earlier). */
+    if ((unsigned int)vicii.last_displayed_line < vicii.screen_height
+        ? vicii.raster.current_line == vicii.screen_height - 1
+        : vicii.raster.current_line == vicii.last_displayed_line - vicii.screen_height) {
+        vicx_end_of_frame();
+    }
+
     raster_line_emulate(&vicii.raster);
 
     vsync_do_end_of_line();
@@ -446,7 +456,6 @@ void vicii_raster_draw_handler(void)
     if (vicii.raster.current_line == 0) {
         /* no vsync here for NTSC  */
         if ((unsigned int)vicii.last_displayed_line < vicii.screen_height) {
-            vicx_end_of_frame();
             vsync_do_vsync(vicii.raster.canvas);
         }
 
@@ -455,7 +464,6 @@ void vicii_raster_draw_handler(void)
     /* vsync for NTSC */
     if ((unsigned int)vicii.last_displayed_line >= vicii.screen_height
         && vicii.raster.current_line == vicii.last_displayed_line - vicii.screen_height + 1) {
-        vicx_end_of_frame();
         vsync_do_vsync(vicii.raster.canvas);
     }
 }

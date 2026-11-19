@@ -253,8 +253,8 @@ static void hash_rebuild(void)
     }
 }
 
-/* The slot showing `rgb' in this frame; a new one if there is room, else
-   the nearest colour already in use. */
+/* The slot showing `rgb' in this frame; a new one if there is room (a free
+   slot, or one this frame has not used), else the nearest colour in use. */
 static uint8_t slot_for(uint32_t rgb)
 {
     unsigned int h = (rgb * 2654435761u) >> 22;
@@ -277,6 +277,21 @@ static uint8_t slot_for(uint32_t rgb)
             vicx.hash_key[h] = rgb + 1;
             vicx.hash_slot[h] = (uint8_t)s;
             vicx.slots_changed = 1;
+            return (uint8_t)s;
+        }
+    }
+    /* No free slot: take one that only the previous frame used.  The canvas
+       palette is installed at the end of the frame, so no line of this
+       frame refers to it.  (Without this a palette fade, which needs a new
+       set of colours every frame, falls back to the nearest of the last
+       frame's colours and flickers.) */
+    for (s = 0; s < 256; s++) {
+        if (!vicx.slot_used[s]) {
+            vicx.slot_live[s] = 1;
+            vicx.slot_used[s] = 1;
+            vicx.slot_rgb[s] = rgb;
+            vicx.slots_changed = 1;
+            hash_rebuild();
             return (uint8_t)s;
         }
     }
